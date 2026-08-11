@@ -161,9 +161,11 @@ def api_stats():
             "username": ch.get('username', ''),
             "is_live": ch.get('is_currently_live', False),
             "total_dm_sent": ch.get('total_dm_sent', 0),
+            "session_dm_sent": ch.get('session_dm_sent', 0),
             "unique_dmed": len(dm_sent_for_ch),
-            "joined_at": ch.get('joined_at', ''),
-            "current_viewers": ch.get('current_viewers', 0)
+            "joined_at": ch.get('added_at', ''),
+            "current_viewers": ch.get('current_viewers', 0),
+            "total_accounts": ch.get('total_accounts_at_join', 0)
         })
 
     return jsonify({
@@ -173,6 +175,7 @@ def api_stats():
             "total_accounts": len(accounts),
             "active_lives": currently_live,
             "total_dm_sent": total_dm_sent,
+            "dm_configured": bool(dm_config.get('message', '').strip()),
             "dm_message": dm_config.get('message', ''),
             "has_media": bool(dm_config.get('media')),
             "channels": channel_list,
@@ -197,7 +200,10 @@ def api_channels():
 
     identifier = invite_link if is_invite and invite_link else channel_input
     if not identifier:
-        return jsonify({"success": False, "error": "Channel username or invite link required"})
+        return jsonify({"success": False, "error": "Channel username, ID, or invite link required"})
+
+    # Detect if it's a numeric channel ID (e.g., -1004368116984)
+    is_channel_id = identifier.lstrip('-').isdigit()
 
     API_ID = int(os.getenv("TELEGRAM_API_ID", "35812449"))
     API_HASH = os.getenv("TELEGRAM_API_HASH", "099cfed535a5b2dcd8e43f157d30e3ce")
@@ -225,8 +231,13 @@ def api_channels():
         entity = None
         joined_already = False
         try:
-            entity = await list(client_pool.values())[0].get_entity(identifier)
-            joined_already = True
+            if is_channel_id:
+                from telethon.tl.types import PeerChannel
+                entity = await list(client_pool.values())[0].get_entity(PeerChannel(int(identifier)))
+                joined_already = True
+            else:
+                entity = await list(client_pool.values())[0].get_entity(identifier)
+                joined_already = True
         except Exception:
             joined_already = False
 
@@ -236,7 +247,6 @@ def api_channels():
         for uid, client in client_pool.items():
             try:
                 if is_invite:
-                    # Invite link join
                     hash_part = identifier.split('/')[-1].replace('+', '')
                     try:
                         update = await client(ImportChatInviteRequest(hash=hash_part))
@@ -247,6 +257,9 @@ def api_channels():
                     except errors.InviteHashInvalidError:
                         join_results[str(uid)] = {"success": False, "error": "Invalid invite"}
                         continue
+                elif is_channel_id:
+                    from telethon.tl.types import PeerChannel
+                    entity = await client.get_entity(PeerChannel(int(identifier)))
                 else:
                     entity = await client.get_entity(identifier)
 
@@ -323,27 +336,31 @@ def api_dm_config():
         config = fb_get('dm_config', {})
         return jsonify({"success": True, "config": config})
 
-    # POST - Set DM message
+    # POST - Set DM message (full save, not merge)
     data = request.get_json()
     message = data.get('message', '')
     image_url = data.get('image_url', '')
     media_file = data.get('media_file', '')
 
-    config = {}
+    # Get existing config to preserve other fields
+    existing = fb_get('dm_config', {}) or {}
+
+    # Build new config
+    new_config = dict(existing)  # preserve existing fields
     if message:
-        config['message'] = message
+        new_config['message'] = message
     if image_url or media_file:
-        config['media'] = {
+        new_config['media'] = {
             'type': 'image',
             'url': image_url or media_file,
             'file_path': media_file
         }
 
-    if config:
-        fb_update('dm_config', config)
-        return jsonify({"success": True, "message": "DM config updated"})
-
-    return jsonify({"success": False, "error": "No changes provided"})
+    # Force full save (not merge) to ensure all fields persist
+    fb_set('dm_config', new_config)
+    
+    logger.info(f"DM config saved: message='{message[:50]}...'")
+    return jsonify({"success": True, "message": "DM config updated", "config": new_config})
 
 
 @app.route('/api/dm/reset', methods=['POST'])
