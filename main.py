@@ -56,13 +56,9 @@ def main():
         health_thread = threading.Thread(target=run_health_server, daemon=True)
         health_thread.start()
 
-        # Nested asyncio fix for Python 3.12+
-        import nest_asyncio
-        nest_asyncio.apply()
-
         bot_app = BotApp(config, db)
         logger.info("🤖 Starting Telegram Live Monitor Bot...")
-        asyncio.get_event_loop().run_until_complete(bot_app.start())
+        asyncio.run(bot_app.start())
 
     except KeyboardInterrupt:
         logger.info("🛑 Bot stopped by user")
