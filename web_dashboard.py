@@ -189,27 +189,123 @@ def api_channels():
         channels = fb_get('channels', {}) or {}
         return jsonify({"success": True, "channels": list(channels.values())})
 
-    # POST - Add channel
+    # POST - Add channel (full flow: check + join all accounts + save)
     data = request.get_json()
-    channel_id = data.get('channel_id', '').strip()
+    channel_input = data.get('channel_input', '').strip()
+    invite_link = data.get('invite_link', '').strip()
+    is_invite = data.get('is_invite', False)
 
-    if not channel_id:
-        return jsonify({"success": False, "error": "Channel ID/username required"})
+    identifier = invite_link if is_invite and invite_link else channel_input
+    if not identifier:
+        return jsonify({"success": False, "error": "Channel username or invite link required"})
 
-    # Import bot functions
-    from bot import join_channel
+    API_ID = int(os.getenv("TELEGRAM_API_ID", "35812449"))
+    API_HASH = os.getenv("TELEGRAM_API_HASH", "099cfed535a5b2dcd8e43f157d30e3ce")
+
+    async def _add_channel():
+        # Load all accounts
+        accounts = fb_get('accounts', {}) or {}
+        if not accounts:
+            return {"success": False, "error": "No accounts connected. Add an account first."}
+
+        client_pool = {}
+        for uid_str, acc in accounts.items():
+            try:
+                session_name = acc.get('session_name', f'account_{uid_str}')
+                client = TelegramClient(session_name, API_ID, API_HASH)
+                await client.start()
+                client_pool[int(uid_str)] = client
+            except Exception as e:
+                pass
+
+        if not client_pool:
+            return {"success": False, "error": "Could not load any accounts"}
+
+        # Step 1: Check if already joined
+        entity = None
+        joined_already = False
+        try:
+            entity = await list(client_pool.values())[0].get_entity(identifier)
+            joined_already = True
+        except Exception:
+            joined_already = False
+
+        # Step 2: Join with ALL accounts
+        join_results = {}
+        success_count = 0
+        for uid, client in client_pool.items():
+            try:
+                if is_invite:
+                    # Invite link join
+                    hash_part = identifier.split('/')[-1].replace('+', '')
+                    try:
+                        update = await client(ImportChatInviteRequest(hash=hash_part))
+                        entity = update.chats[0] if update.chats else entity
+                    except errors.InviteHashExpiredError:
+                        join_results[str(uid)] = {"success": False, "error": "Invite expired"}
+                        continue
+                    except errors.InviteHashInvalidError:
+                        join_results[str(uid)] = {"success": False, "error": "Invalid invite"}
+                        continue
+                else:
+                    entity = await client.get_entity(identifier)
+
+                try:
+                    await client(JoinChannelRequest(entity))
+                    join_results[str(uid)] = {"success": True, "message": "Joined"}
+                    success_count += 1
+                except Exception as e:
+                    if "already" in str(e).lower():
+                        join_results[str(uid)] = {"success": True, "message": "Already joined"}
+                        success_count += 1
+                    else:
+                        join_results[str(uid)] = {"success": False, "error": str(e)}
+
+            except Exception as e:
+                join_results[str(uid)] = {"success": False, "error": str(e)}
+
+            await asyncio.sleep(1.5)
+
+        # Disconnect all
+        for client in client_pool.values():
+            await client.disconnect()
+
+        # Step 3: Save channel info
+        ch_id = str(getattr(entity, 'id', '')) if entity else identifier
+        title = getattr(entity, 'title', identifier) if entity else identifier
+        username = getattr(entity, 'username', '') if entity else ''
+
+        channel_info = {
+            "id": ch_id,
+            "title": title,
+            "username": username,
+            "identifier": identifier,
+            "is_invite": is_invite,
+            "added_at": datetime.now(timezone.utc).isoformat(),
+            "is_active": True,
+            "total_dm_sent": 0,
+            "session_dm_sent": 0,
+            "is_currently_live": False,
+            "current_viewers": 0,
+            "total_accounts_at_join": len(accounts),
+            "last_live_at": None
+        }
+        fb_update(f'channels/{ch_id}', channel_info)
+
+        return {
+            "success": True,
+            "was_already_joined": joined_already,
+            "accounts_joined": success_count,
+            "total_accounts": len(accounts),
+            "channel": channel_info,
+            "join_details": join_results
+        }
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    result = loop.run_until_complete(join_channel(channel_id))
+    result = loop.run_until_complete(_add_channel())
     loop.close()
-
-    if result.get('success'):
-        return jsonify({
-            "success": True,
-            "message": f"Added: {result['channel']['title']}",
-            "channel": result['channel']
-        })
-    return jsonify({"success": False, "error": result.get('error', 'Unknown error')})
+    return jsonify(result)
 
 
 @app.route('/api/channels/<channel_id>', methods=['DELETE'])

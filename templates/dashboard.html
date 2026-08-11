@@ -162,6 +162,10 @@
             <div class="bot-title">⚡ Live Stream Monitor Bot</div>
         </div>
 
+        <div id="dmWarning" style="display:none;padding:10px;margin:0 0 12px 0;background:rgba(255,71,87,0.12);border:1px solid var(--red);border-radius:10px;font-size:12px;text-align:center;">
+            ⚠️ <strong>DM message not set!</strong> DMs won't be sent. <a onclick="openModal('setMessageModal')" style="color:var(--accent-glow);cursor:pointer;text-decoration:underline;">Set it here</a>
+        </div>
+
         <div class="stats-row">
             <div class="stat-card" onclick="openModal('accountsModal')">
                 <div class="stat-icon">👤</div>
@@ -221,7 +225,24 @@
     </div>
 
     <!-- ========== MODALS ========== -->
-    <div class="modal-overlay" id="addChannelModal"><div class="modal"><button class="close-btn" onclick="closeModal('addChannelModal')">✕</button><h3>➕ Add Channel</h3><div class="input-group"><label>Channel Username or Invite Link</label><input type="text" id="channelInput" placeholder="@username or https://t.me/..."></div><p style="font-size:11px;color:var(--text-muted);margin-bottom:12px;">⚠️ Bot must be admin in channel, or use invite link.</p><button class="btn-submit" onclick="addChannel()">Add & Monitor</button><div id="addChannelResult" style="margin-top:10px;font-size:13px;"></div></div></div>
+    <!-- Add Channel (Multi-Step Flow) -->
+    <div class="modal-overlay" id="addChannelModal">
+        <div class="modal"><button class="close-btn" onclick="closeModal('addChannelModal')">✕</button>
+            <h3>➕ Add Channel</h3>
+            <!-- Step 1: Check joined status -->
+            <div id="addChannelStep1">
+                <div class="input-group"><label>Channel Username (@username)</label><input type="text" id="channelInput" placeholder="@channel_username"></div>
+                <p style="text-align:center;color:var(--text-muted);margin:8px 0;">— OR —</p>
+                <button class="btn-submit" onclick="showInviteLink()" style="background:var(--bg);border:1px solid var(--border);color:var(--text);">🔗 Use Invite Link</button>
+                <div id="inviteLinkSection" style="display:none;margin-top:10px;">
+                    <div class="input-group"><label>Invite Link</label><input type="text" id="inviteLinkInput" placeholder="https://t.me/+abcdef..."></div>
+                </div>
+                <button class="btn-submit" onclick="checkAndAddChannel()" style="margin-top:12px;">🔍 Check & Add</button>
+            </div>
+            <div id="addChannelResult" style="margin-top:10px;font-size:13px;"></div>
+            <div id="addChannelStep2" style="display:none;"></div>
+        </div>
+    </div>
 
     <div class="modal-overlay" id="liveMonitorModal"><div class="modal"><button class="close-btn" onclick="closeModal('liveMonitorModal')">✕</button><h3>🔴 Live Monitor</h3><div id="liveMonitorContent"><div class="spinner"></div></div></div></div>
 
@@ -275,24 +296,72 @@
                     document.getElementById('statChannels').textContent = d.total_channels;
                     document.getElementById('statMonitoring').textContent = d.active_lives;
                     document.getElementById('statDmSent').textContent = d.total_dm_sent;
+                    // Show DM warning if not configured
+                    const warn = document.getElementById('dmWarning');
+                    if (d.dm_configured) { warn.style.display = 'none'; }
+                    else { warn.style.display = 'block'; }
                 }
             } catch (e) { console.error(e); }
         }
 
-        // ============ ADD CHANNEL ============
-        async function addChannel() {
-            const input = document.getElementById('channelInput').value.trim();
+        // ============ ADD CHANNEL (Multi-Step Flow) ============
+        function showInviteLink() {
+            document.getElementById('inviteLinkSection').style.display = 'block';
+        }
+
+        async function checkAndAddChannel() {
+            const username = document.getElementById('channelInput').value.trim();
+            const inviteLink = document.getElementById('inviteLinkInput').value.trim();
             const r = document.getElementById('addChannelResult');
-            if (!input) { r.innerHTML = '<span style="color:var(--red);">Enter channel username or link</span>'; return; }
-            r.innerHTML = '<div class="spinner"></div>';
+            const step2 = document.getElementById('addChannelStep2');
+
+            const isInvite = !!inviteLink;
+            const input = isInvite ? inviteLink : username;
+
+            if (!input) {
+                r.innerHTML = '<span style="color:var(--red);">❌ Enter channel username OR invite link</span>';
+                return;
+            }
+
+            r.innerHTML = '<div class="spinner"></div><p style="text-align:center;color:var(--text-muted);">⏳ Checking & joining with ALL accounts...</p>';
+
             try {
-                const res = await api('/api/channels', 'POST', { channel_id: input });
+                const res = await api('/api/channels', 'POST', {
+                    channel_input: username,
+                    invite_link: isInvite ? inviteLink : '',
+                    is_invite: isInvite
+                });
+
                 if (res.success) {
-                    r.innerHTML = '<span style="color:var(--green);">✅ Added: ' + res.channel.title + '</span>';
+                    let detailHtml = '<span style="color:var(--green);">✅ Channel added successfully!</span><br>';
+                    detailHtml += '<div style="margin-top:8px;padding:10px;background:var(--bg);border-radius:8px;font-size:12px;">';
+                    detailHtml += '<strong>' + res.channel.title + '</strong><br>';
+                    detailHtml += '📊 Accounts joined: <strong>' + res.accounts_joined + '/' + res.total_accounts + '</strong><br>';
+                    if (res.was_already_joined) detailHtml += 'ℹ️ Was already joined<br>';
+                    detailHtml += '</div>';
+
+                    // Show join details per account
+                    if (res.join_details) {
+                        detailHtml += '<div style="margin-top:6px;font-size:10px;color:var(--text-muted);">';
+                        Object.entries(res.join_details).forEach(([uid, info]) => {
+                            const icon = info.success ? '✅' : '❌';
+                            detailHtml += icon + ' Account ' + uid + ': ' + (info.message || info.error) + '<br>';
+                        });
+                        detailHtml += '</div>';
+                    }
+
+                    r.innerHTML = detailHtml;
                     document.getElementById('channelInput').value = '';
-                    showToast('Channel added!'); loadStats();
-                } else { r.innerHTML = '<span style="color:var(--red);">❌ ' + res.error + '</span>'; }
-            } catch (e) { r.innerHTML = '<span style="color:var(--red);">Error: ' + e.message + '</span>'; }
+                    document.getElementById('inviteLinkInput').value = '';
+                    document.getElementById('inviteLinkSection').style.display = 'none';
+                    showToast('Channel added — monitoring started!');
+                    loadStats();
+                } else {
+                    r.innerHTML = '<span style="color:var(--red);">❌ ' + res.error + '</span>';
+                }
+            } catch (e) {
+                r.innerHTML = '<span style="color:var(--red);">❌ Error: ' + e.message + '</span>';
+            }
         }
 
         async function removeChannel(channelId) {
@@ -308,16 +377,18 @@
                 const res = await api('/api/stats');
                 if (!res.success) { container.innerHTML = '<p style="color:var(--red);">Failed to load</p>'; return; }
                 const channels = res.data.channels;
-                if (!channels.length) {
+                if (!res.data.dm_configured) {
+                    container.innerHTML = '<div style="padding:10px;background:rgba(255,71,87,0.1);border:1px solid var(--red);border-radius:8px;margin-bottom:10px;font-size:12px;">⚠️ <strong>DM message not set!</strong> DMs won\'t be sent. Go to <strong>Set Message</strong>.</div>';
+                } else if (!channels.length) {
                     container.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:20px;">No channels yet.<br>Use <strong>Add Channel</strong> to start.</p>';
-                    return;
+                } else {
+                    let html = '';
+                    channels.forEach(ch => {
+                        const isLive = ch.is_live;
+                        html += '<div class="channel-item" onclick="viewChannelDetails(\'' + ch.id + '\', \'' + ch.title.replace(/'/g, "\\'") + '\')"><div class="ch-info"><div class="live-dot ' + (isLive ? '' : 'offline') + '"></div><div><div class="ch-name">' + ch.title + '</div><div class="ch-stats">' + (isLive ? '🔴 LIVE • ' + ch.current_viewers + ' viewers' : '⚫ Offline') + ' • ' + ch.total_dm_sent + ' DMs sent from ' + (ch.total_accounts || '?') + ' accounts</div></div></div><span style="color:var(--text-muted);font-size:18px;">→</span></div>';
+                    });
+                    container.innerHTML = html;
                 }
-                let html = '';
-                channels.forEach(ch => {
-                    const isLive = ch.is_live;
-                    html += '<div class="channel-item" onclick="viewChannelDetails(\'' + ch.id + '\', \'' + ch.title.replace(/'/g, "\\'") + '\')"><div class="ch-info"><div class="live-dot ' + (isLive ? '' : 'offline') + '"></div><div><div class="ch-name">' + ch.title + '</div><div class="ch-stats">' + (isLive ? '🔴 LIVE • ' + ch.current_viewers + ' viewers' : '⚫ Offline') + ' • ' + ch.total_dm_sent + ' DMs</div></div></div><span style="color:var(--text-muted);font-size:18px;">→</span></div>';
-                });
-                container.innerHTML = html;
             } catch (e) { container.innerHTML = '<p style="color:var(--red);">Error: ' + e.message + '</p>'; }
         }
 
@@ -358,7 +429,8 @@
                 const res = await api('/api/stats');
                 if (!res.success) { container.innerHTML = '<p style="color:var(--red);">Failed</p>'; return; }
                 const d = res.data;
-                container.innerHTML = '<div class="viewer-stats"><div class="viewer-stat"><div class="val">' + d.total_channels + '</div><div class="lbl">Channels</div></div><div class="viewer-stat"><div class="val">' + d.total_accounts + '</div><div class="lbl">Accounts</div></div><div class="viewer-stat"><div class="val" style="color:var(--red);">' + d.active_lives + '</div><div class="lbl">Live Now</div></div><div class="viewer-stat"><div class="val">' + d.total_dm_sent + '</div><div class="lbl">Total DMs</div></div></div><p style="font-size:12px;color:var(--text-muted);margin-top:8px;">💬 Current DM: ' + (d.dm_message || 'Not set').substring(0,80) + '...</p><p style="font-size:12px;color:var(--text-muted);">🖼️ Media: ' + (d.has_media ? 'Yes' : 'None') + '</p><p style="font-size:12px;color:var(--text-muted);">🛡️ Admins: ' + (d.admins ? d.admins.length + 1 : 1) + '</p>';
+                let dmWarn = d.dm_configured ? '' : '<div style="padding:10px;background:rgba(255,71,87,0.1);border:1px solid var(--red);border-radius:8px;margin-bottom:10px;font-size:12px;">⚠️ <strong>DM message not set!</strong> DMs will NOT be sent. Go to <strong>Set Message</strong> first.</div>';
+                container.innerHTML = dmWarn + '<div class="viewer-stats"><div class="viewer-stat"><div class="val">' + d.total_channels + '</div><div class="lbl">Channels</div></div><div class="viewer-stat"><div class="val">' + d.total_accounts + '</div><div class="lbl">Accounts</div></div><div class="viewer-stat"><div class="val" style="color:var(--red);">' + d.active_lives + '</div><div class="lbl">Live Now</div></div><div class="viewer-stat"><div class="val">' + d.total_dm_sent + '</div><div class="lbl">Total DMs</div></div></div><p style="font-size:12px;color:var(--text-muted);margin-top:8px;">💬 DM: ' + (d.dm_configured ? '✅ ' + (d.dm_message || '').substring(0,60) + '...' : '❌ Not set!') + '</p><p style="font-size:12px;color:var(--text-muted);">🖼️ Media: ' + (d.has_media ? 'Yes' : 'None') + '</p>';
             } catch (e) { container.innerHTML = '<p style="color:var(--red);">Error</p>'; }
         }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Telegram Live Stream Monitor Bot
-Monitors channels for live streams and sends DMs to viewers.
+Telegram Live Stream Monitor Bot v3
+Monitors channels for live streams and sends DMs to viewers from ALL connected accounts.
 Built with Telethon + Firebase Realtime Database.
 """
 
@@ -9,7 +9,7 @@ import os
 import json
 import asyncio
 import logging
-import re
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -18,8 +18,9 @@ from telethon.tl.types import (
     MessageMediaPhoto, MessageMediaDocument,
     InputPeerChannel, InputPeerUser, PeerChannel, PeerUser
 )
-from telethon.tl.functions.messages import GetDialogsRequest
-from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest
+from telethon.tl.functions.messages import GetDialogsRequest, CheckChatInviteRequest
+from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest, GetParticipantRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest
 import firebase_admin
 from firebase_admin import credentials, db
 
@@ -29,90 +30,18 @@ load_dotenv()
 API_ID = int(os.getenv("TELEGRAM_API_ID", "35812449"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "099cfed535a5b2dcd8e43f157d30e3ce")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8710003468:AAFou6EOMDf0L7tr2cId3K2dwDbR-6AfQXM")
-ADMIN_IDS = [5844447576]  # Initial admin ID
+ADMIN_IDS = [5844447576]
 FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "")
 FIREBASE_CRED_PATH = os.getenv("FIREBASE_CRED_PATH", "firebase-cred.json")
 
 # ==================== LOGGING ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ==================== FIREBASE ====================
-firebase_app = None
+# ==================== DATABASE ====================
 firebase_ref = None
-
-
-def init_firebase():
-    global firebase_app, firebase_ref
-    try:
-        if FIREBASE_DB_URL:
-            cred = credentials.Certificate(FIREBASE_CRED_PATH)
-            firebase_app = firebase_admin.initialize_app(cred, {
-                'databaseURL': FIREBASE_DB_URL
-            })
-            firebase_ref = db.reference('/')
-            logger.info("Firebase initialized successfully")
-        else:
-            logger.warning("FIREBASE_DB_URL not set — using local JSON fallback")
-    except Exception as e:
-        logger.error(f"Firebase init failed: {e}")
-
-
-def fb_get(path, default=None):
-    """Get data from Firebase or local fallback."""
-    if firebase_ref:
-        return firebase_ref.child(path).get() or default
-    return local_db.get(path, default)
-
-
-def fb_set(path, value):
-    """Set data in Firebase or local fallback."""
-    if firebase_ref:
-        firebase_ref.child(path).set(value)
-    else:
-        local_db_set(path, value)
-
-
-def fb_update(path, value):
-    """Update data in Firebase or local fallback."""
-    if firebase_ref:
-        firebase_ref.child(path).update(value)
-    else:
-        current = local_db.get(path, {}) or {}
-        current.update(value)
-        local_db_set(path, current)
-
-
-def fb_push(path, value):
-    """Push data to Firebase list or local fallback."""
-    if firebase_ref:
-        return firebase_ref.child(path).push(value).key
-    else:
-        lst = local_db.get(path, []) or []
-        key = f"push_{len(lst)}_{int(datetime.now().timestamp())}"
-        value['_key'] = key
-        lst.append(value)
-        local_db_set(path, lst)
-        return key
-
-
-def fb_delete(path):
-    """Delete data from Firebase or local fallback."""
-    if firebase_ref:
-        firebase_ref.child(path).delete()
-    else:
-        if path in local_db:
-            del local_db[path]
-        save_local_db()
-
-
-# Local JSON fallback
 LOCAL_DB_PATH = Path("local_db.json")
 local_db = {}
-
 
 def load_local_db():
     global local_db
@@ -120,13 +49,43 @@ def load_local_db():
         with open(LOCAL_DB_PATH, 'r') as f:
             local_db = json.load(f)
 
-
 def save_local_db():
     with open(LOCAL_DB_PATH, 'w') as f:
         json.dump(local_db, f, indent=2, default=str)
 
+def init_firebase():
+    global firebase_ref
+    try:
+        if FIREBASE_DB_URL:
+            cred = credentials.Certificate(FIREBASE_CRED_PATH)
+            firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_DB_URL})
+            firebase_ref = db.reference('/')
+            logger.info("Firebase connected")
+    except Exception as e:
+        logger.warning(f"Firebase init failed, using local DB: {e}")
 
-def local_db_set(path, value):
+def fb_get(path, default=None):
+    try:
+        if firebase_ref:
+            val = firebase_ref.child(path).get()
+            return val if val is not None else default
+    except:
+        pass
+    parts = path.strip('/').split('/')
+    d = local_db
+    for part in parts:
+        if isinstance(d, dict) and part in d:
+            d = d[part]
+        else:
+            return default
+    return d
+
+def fb_set(path, value):
+    if firebase_ref:
+        try:
+            firebase_ref.child(path).set(value)
+        except:
+            pass
     parts = path.strip('/').split('/')
     d = local_db
     for part in parts[:-1]:
@@ -136,678 +95,682 @@ def local_db_set(path, value):
     d[parts[-1]] = value
     save_local_db()
 
+def fb_update(path, value):
+    current = fb_get(path, {}) or {}
+    if isinstance(current, dict):
+        current.update(value)
+        fb_set(path, current)
 
-# ==================== BOT STATE ====================
-class BotState:
-    """Manages bot runtime state."""
+def fb_delete(path):
+    if firebase_ref:
+        try:
+            firebase_ref.child(path).delete()
+        except:
+            pass
+    parts = path.strip('/').split('/')
+    d = local_db
+    for part in parts[:-1]:
+        if part in d:
+            d = d[part]
+        else:
+            return
+    if parts[-1] in d:
+        del d[parts[-1]]
+    save_local_db()
+
+
+# ==================== CLIENT POOL ====================
+class ClientPool:
+    """Manages multiple Telegram client sessions for all accounts."""
 
     def __init__(self):
-        self.client: TelegramClient = None
+        self.clients: dict = {}  # user_id -> TelegramClient
+        self.main_client: TelegramClient = None
         self.bot_client: TelegramClient = None
         self.me = None
-        self.bot_me = None
-        self.monitoring_tasks: dict = {}  # channel_id -> asyncio.Task
-        self.dm_sent_cache: dict = {}  # channel_id -> {user_id: timestamp}
-        self.active_lives: dict = {}  # channel_id -> live_info
 
-    def is_admin(self, user_id: int) -> bool:
-        admins = fb_get('admins', []) or []
-        return user_id in admins or user_id in ADMIN_IDS
+    async def init_main(self):
+        """Initialize the main admin client."""
+        self.main_client = TelegramClient('main_session', API_ID, API_HASH)
+        await self.main_client.start()
+        self.me = await self.main_client.get_me()
+        self.clients[self.me.id] = self.main_client
+        logger.info(f"Main client: {self.me.first_name} (@{self.me.username})")
 
-    def add_admin(self, user_id: int):
-        admins = fb_get('admins', []) or []
-        if user_id not in admins:
-            admins.append(user_id)
-            fb_set('admins', admins)
+    async def init_bot(self):
+        """Initialize bot client."""
+        self.bot_client = TelegramClient('bot_session', API_ID, API_HASH)
+        await self.bot_client.start(bot_token=BOT_TOKEN)
+        bot_me = await self.bot_client.get_me()
+        logger.info(f"Bot client: @{bot_me.username}")
 
-    def remove_admin(self, user_id: int):
-        admins = fb_get('admins', []) or []
-        if user_id in admins:
-            admins.remove(user_id)
-            fb_set('admins', admins)
+    async def load_all_accounts(self):
+        """Load all saved accounts and create clients for them."""
+        accounts = fb_get('accounts', {}) or {}
+        for user_id_str, acc in accounts.items():
+            try:
+                user_id = int(user_id_str)
+                if user_id in self.clients:
+                    continue
+                session_name = acc.get('session_name', f'account_{user_id}')
+                client = TelegramClient(session_name, API_ID, API_HASH)
+                await client.start()
+                self.clients[user_id] = client
+                logger.info(f"Loaded account: {acc.get('first_name', 'Unknown')} ({user_id})")
+            except Exception as e:
+                logger.warning(f"Failed to load account {user_id_str}: {e}")
 
+    def get_all_clients(self) -> list:
+        """Get all active clients."""
+        return list(self.clients.values())
 
-state = BotState()
+    def get_client(self, user_id: int) -> TelegramClient:
+        return self.clients.get(user_id)
 
-
-# ==================== TELEGRAM CLIENT SETUP ====================
-async def init_clients():
-    """Initialize both user client and bot client."""
-    # User client (for monitoring channels)
-    state.client = TelegramClient('user_session', API_ID, API_HASH)
-    await state.client.start()
-    state.me = await state.client.get_me()
-    logger.info(f"User client logged in as: {state.me.first_name} (@{state.me.username})")
-
-    # Bot client (for bot-specific operations)
-    state.bot_client = TelegramClient('bot_session', API_ID, API_HASH)
-    await state.bot_client.start(bot_token=BOT_TOKEN)
-    state.bot_me = await state.bot_client.get_me()
-    logger.info(f"Bot client logged in as: @{state.bot_me.username}")
-
-
-# ==================== CHANNEL MANAGEMENT ====================
-async def join_channel(channel_identifier: str) -> dict:
-    """Join a channel by username or invite link."""
-    try:
-        # Parse channel identifier
-        if channel_identifier.startswith('https://t.me/'):
-            # Extract from link: https://t.me/username or https://t.me/+invitehash
-            channel_identifier = channel_identifier.replace('https://t.me/', '').strip()
-            if channel_identifier.startswith('+'):
-                # Private invite link
-                try:
-                    update = await state.client(
-                        functions.messages.ImportChatInviteRequest(hash=channel_identifier[1:])
-                    )
-                    entity = update.chats[0] if update.chats else None
-                except errors.InviteHashExpiredError:
-                    return {"success": False, "error": "Invite link expired"}
-                except errors.InviteHashInvalidError:
-                    return {"success": False, "error": "Invalid invite link"}
-            else:
-                entity = await state.client.get_entity(channel_identifier)
-        else:
-            entity = await state.client.get_entity(channel_identifier)
-
-        # Try to join
+    async def add_client(self, session_name: str, user_id: int):
+        """Add a new client to the pool."""
         try:
-            await state.client(JoinChannelRequest(entity))
-        except errors.FloodWaitError as e:
-            return {"success": False, "error": f"Flood wait: {e.seconds}s"}
+            client = TelegramClient(session_name, API_ID, API_HASH)
+            await client.start()
+            self.clients[user_id] = client
+            logger.info(f"Added client: {user_id}")
+            return client
         except Exception as e:
-            if "already" in str(e).lower():
-                pass  # Already joined
-            else:
-                return {"success": False, "error": str(e)}
+            logger.error(f"Failed to add client {user_id}: {e}")
+            return None
 
-        channel_id = str(entity.id)
-        channel_info = {
-            "id": channel_id,
-            "title": getattr(entity, 'title', channel_identifier),
-            "username": getattr(entity, 'username', ''),
-            "access_hash": str(getattr(entity, 'access_hash', '0')),
-            "joined_at": datetime.now(timezone.utc).isoformat(),
-            "is_active": True,
-            "total_dm_sent": 0,
-            "last_live_at": None
-        }
-
-        # Save to database
-        fb_update(f'channels/{channel_id}', channel_info)
-
-        logger.info(f"Joined channel: {entity.title}")
-        return {"success": True, "channel": channel_info}
-
-    except ValueError as e:
-        return {"success": False, "error": f"Channel not found: {str(e)}"}
-    except Exception as e:
-        logger.error(f"Error joining channel: {e}")
-        return {"success": False, "error": str(e)}
+    async def ensure_all_connected(self):
+        """Ensure all clients are connected."""
+        for uid, client in list(self.clients.items()):
+            try:
+                if not client.is_connected():
+                    await client.connect()
+            except:
+                pass
 
 
-async def get_joined_channels() -> list:
-    """Get all joined channels."""
-    channels = fb_get('channels', {}) or {}
-    return list(channels.values())
+pool = ClientPool()
 
 
-async def remove_channel(channel_id: str) -> bool:
-    """Remove a channel from monitoring."""
-    # Cancel monitoring task
-    if channel_id in state.monitoring_tasks:
-        state.monitoring_tasks[channel_id].cancel()
-        del state.monitoring_tasks[channel_id]
+# ==================== CHANNEL JOIN FLOW ====================
+async def check_channel_joined(identifier: str) -> dict:
+    """
+    Check if channel is already joined.
+    Returns: {joined: bool, entity: ..., title: ..., channel_id: ...}
+    """
+    await pool.ensure_all_connected()
 
-    fb_delete(f'channels/{channel_id}')
-    fb_delete(f'dm_sent/{channel_id}')
-    if channel_id in state.active_lives:
-        del state.active_lives[channel_id]
-    return True
-
-
-# ==================== LIVE STREAM DETECTION ====================
-async def check_live_stream(channel_id: str, channel_info: dict) -> bool:
-    """Check if a channel is currently live streaming."""
+    # Try to resolve the identifier
     try:
-        entity = await state.client.get_entity(int(channel_id))
-        messages = await state.client.get_messages(entity, limit=5)
+        entity = await pool.main_client.get_entity(identifier)
+        return {
+            "joined": True,
+            "entity": entity,
+            "title": getattr(entity, 'title', str(entity.id)),
+            "channel_id": str(entity.id),
+            "username": getattr(entity, 'username', ''),
+            "is_public": bool(getattr(entity, 'username', ''))
+        }
+    except errors.ChannelPrivateError:
+        return {"joined": False, "reason": "private", "message": "Channel is private — need invite link"}
+    except ValueError:
+        return {"joined": False, "reason": "not_found", "message": "Channel not found"}
+    except Exception as e:
+        return {"joined": False, "reason": "error", "message": str(e)}
+
+
+async def join_with_all_accounts(identifier: str, is_invite: bool = False) -> dict:
+    """
+    Join a channel with ALL connected accounts.
+    Returns detailed results per account.
+    """
+    await pool.ensure_all_connected()
+
+    results = {}
+    success_count = 0
+    fail_count = 0
+
+    for user_id, client in pool.clients.items():
+        try:
+            if is_invite:
+                # Invite link join
+                if identifier.startswith('https://t.me/+'):
+                    hash_part = identifier.split('/')[-1].replace('+', '')
+                    try:
+                        update = await client(ImportChatInviteRequest(hash=hash_part))
+                        entity = update.chats[0] if update.chats else None
+                    except errors.InviteHashExpiredError:
+                        results[str(user_id)] = {"success": False, "error": "Invite expired"}
+                        fail_count += 1
+                        continue
+                    except errors.InviteHashInvalidError:
+                        results[str(user_id)] = {"success": False, "error": "Invalid invite"}
+                        fail_count += 1
+                        continue
+                elif identifier.startswith('https://t.me/'):
+                    username = identifier.replace('https://t.me/', '').split('?')[0]
+                    entity = await client.get_entity(username)
+                else:
+                    entity = await client.get_entity(identifier)
+            else:
+                # Public channel/username
+                entity = await client.get_entity(identifier)
+
+            try:
+                await client(JoinChannelRequest(entity))
+                results[str(user_id)] = {"success": True, "message": "Joined"}
+                success_count += 1
+            except errors.FloodWaitError as e:
+                results[str(user_id)] = {"success": False, "error": f"Flood wait {e.seconds}s"}
+                fail_count += 1
+            except Exception as e:
+                if "already" in str(e).lower() or "participant" in str(e).lower():
+                    results[str(user_id)] = {"success": True, "message": "Already joined"}
+                    success_count += 1
+                else:
+                    results[str(user_id)] = {"success": False, "error": str(e)}
+                    fail_count += 1
+
+        except errors.FloodWaitError as e:
+            results[str(user_id)] = {"success": False, "error": f"Flood wait {e.seconds}s"}
+            fail_count += 1
+        except Exception as e:
+            results[str(user_id)] = {"success": False, "error": str(e)}
+            fail_count += 1
+
+        # Small delay between joins to avoid flood
+        await asyncio.sleep(1.5)
+
+    channel_entity = None
+    try:
+        channel_entity = await pool.main_client.get_entity(identifier)
+    except:
+        pass
+
+    return {
+        "success": success_count > 0,
+        "total_accounts": len(pool.clients),
+        "joined": success_count,
+        "failed": fail_count,
+        "per_account": results,
+        "channel_id": str(getattr(channel_entity, 'id', '')),
+        "title": getattr(channel_entity, 'title', identifier),
+        "username": getattr(channel_entity, 'username', '')
+    }
+
+
+async def save_channel(channel_id: str, title: str, username: str = '', identifier: str = '') -> dict:
+    """Save channel to database for monitoring."""
+    channel_info = {
+        "id": channel_id,
+        "title": title,
+        "username": username,
+        "identifier": identifier,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+        "is_active": True,
+        "total_dm_sent": 0,
+        "session_dm_sent": 0,
+        "is_currently_live": False,
+        "current_viewers": 0,
+        "last_live_at": None,
+        "total_accounts_at_join": len(pool.clients)
+    }
+
+    fb_update(f'channels/{channel_id}', channel_info)
+    logger.info(f"Channel saved: {title} ({channel_id})")
+    return channel_info
+
+
+# ==================== LIVE DETECTION ====================
+async def is_channel_live(client: TelegramClient, channel_id: str) -> tuple:
+    """
+    Check if a channel is currently live streaming.
+    Returns: (is_live: bool, viewers: list)
+    """
+    try:
+        entity = await client.get_entity(int(channel_id))
+        messages = await client.get_messages(entity, limit=10)
+
+        viewers = set()
+        live_found = False
 
         for msg in messages:
             if msg is None:
                 continue
-            # Check for live stream indicators
+
             text = (msg.message or '').lower()
-            media = msg.media
 
-            # Telegram voice/video chat = live stream
-            if hasattr(media, 'action') or hasattr(media, 'participants'):
-                return True
-
-            # Common live stream indicators in message
+            # Check live indicators
             live_keywords = ['🔴 live', 'stream started', 'is live', 'live now',
-                           'broadcasting', '#live', 'live stream']
+                           'broadcasting', '#live', 'live stream', 'went live',
+                           'starting live', 'live on', 'streaming now']
             if any(kw in text for kw in live_keywords):
-                return True
+                live_found = True
 
-            # Check action types
-            if hasattr(msg, 'action') and msg.action:
-                action_type = str(type(msg.action).__name__).lower()
-                if 'live' in action_type or 'stream' in action_type:
-                    return True
+            # Check for voice/video chat indicators (Telegram live stream)
+            if msg.action:
+                action_name = str(msg.action).lower()
+                if any(kw in action_name for kw in ['live', 'stream', 'broadcast']):
+                    live_found = True
 
-        return False
+            # Check media for live indicators
+            if msg.media:
+                media_str = str(msg.media).lower()
+                if any(kw in media_str for kw in ['live', 'stream']):
+                    live_found = True
 
-    except Exception as e:
-        logger.error(f"Error checking live status for {channel_id}: {e}")
-        return False
+            # Collect viewers (message senders from last 10 messages)
+            if msg.from_id and live_found:
+                try:
+                    if hasattr(msg.from_id, 'user_id'):
+                        viewers.add(msg.from_id.user_id)
+                except:
+                    pass
 
+            # Check reactions/view count
+            if msg.views and msg.views > 10 and msg.date:
+                age_seconds = (datetime.now(timezone.utc) - msg.date.replace(tzinfo=timezone.utc)).total_seconds()
+                if age_seconds < 300:  # Message is less than 5 min old with views
+                    live_found = True
 
-async def get_live_viewers(channel_id: str) -> list:
-    """Get current live stream viewers/participants."""
-    try:
-        entity = await state.client.get_entity(int(channel_id))
-        full_chat = await state.client(GetFullChannelRequest(channel=entity))
+        # If live found, get more viewers from recent messages
+        if live_found:
+            recent_msgs = await client.get_messages(entity, limit=30)
+            for msg in recent_msgs:
+                if msg and msg.from_id:
+                    try:
+                        if hasattr(msg.from_id, 'user_id'):
+                            viewers.add(msg.from_id.user_id)
+                    except:
+                        pass
 
-        participants = []
-        if hasattr(full_chat, 'full_chat'):
-            fc = full_chat.full_chat
-            if hasattr(fc, 'participants_count'):
-                logger.info(f"Channel {channel_id} has {fc.participants_count} participants")
-
-        # Get recent participants from last live-related messages
-        messages = await state.client.get_messages(entity, limit=20)
-        viewers = set()
-
-        for msg in messages:
-            if msg and msg.from_id:
-                user_id = None
-                if isinstance(msg.from_id, types.PeerUser):
-                    user_id = msg.from_id.user_id
-
-                if user_id and user_id > 0:
-                    viewers.add(user_id)
-
-            # Check for reactions / views on live message
-            if msg and hasattr(msg, 'views') and msg.views and msg.views > 0:
-                pass  # Has views, likely live content
-
-        return list(viewers)
+        return (live_found, list(viewers))
 
     except Exception as e:
-        logger.error(f"Error getting live viewers for {channel_id}: {e}")
-        return []
+        logger.error(f"Live check error for {channel_id}: {e}")
+        return (False, [])
 
 
-# ==================== DM SENDING LOGIC ====================
-def get_dm_message():
-    """Get the configured DM message."""
-    return fb_get('dm_config/message', "👋 Hi! I noticed you're watching this live stream. Check out our community!")
+# ==================== DM SENDING FROM ALL ACCOUNTS ====================
+def get_dm_config() -> dict:
+    """Get DM message configuration."""
+    return fb_get('dm_config', {}) or {}
 
 
-def get_dm_media():
-    """Get configured DM media info."""
-    return fb_get('dm_config/media', {})
+def has_config_message() -> bool:
+    """Check if DM message is configured."""
+    config = get_dm_config()
+    return bool(config.get('message', '').strip())
 
 
-def has_received_dm(channel_id: str, user_id: int) -> bool:
-    """Check if a user has already received a DM from this channel."""
+def has_user_received_dm(channel_id: str, user_id: int) -> bool:
+    """Check if user already received DM from this channel."""
     sent = fb_get(f'dm_sent/{channel_id}', {}) or {}
     return str(user_id) in sent
 
 
-def mark_dm_sent(channel_id: str, user_id: int):
-    """Mark that a DM was sent to a user."""
-    fb_update(f'dm_sent/{channel_id}', {
-        str(user_id): datetime.now(timezone.utc).isoformat()
+def mark_user_dmed(channel_id: str, user_id: int, account_id: int):
+    """Mark that a user received DM from a specific account."""
+    fb_set(f'dm_sent/{channel_id}/{user_id}', {
+        "dmed_at": datetime.now(timezone.utc).isoformat(),
+        "from_account": account_id
     })
-    # Increment total count
-    current = fb_get(f'channels/{channel_id}/total_dm_sent', 0) or 0
-    fb_set(f'channels/{channel_id}/total_dm_sent', current + 1)
 
 
-async def send_dm_to_user(user_id: int, message: str, media_info: dict = None) -> bool:
-    """Send a DM to a specific user."""
+async def send_dm_from_client(client: TelegramClient, user_id: int, message: str,
+                               media_url: str = None) -> bool:
+    """Send DM to a user from a specific client."""
     try:
-        entity = await state.client.get_entity(user_id)
+        entity = await client.get_input_entity(user_id)
 
-        # Send media if configured
-        if media_info and media_info.get('file_id'):
-            file_path = media_info.get('file_path', '')
-            if file_path and os.path.exists(file_path):
-                await state.client.send_file(
-                    entity,
-                    file_path,
-                    caption=message
-                )
-            else:
-                await state.client.send_message(entity, message)
+        if media_url and media_url.startswith('http'):
+            # Send with image URL
+            try:
+                await client.send_message(entity, message, file=media_url)
+            except:
+                await client.send_message(entity, message)
         else:
-            await state.client.send_message(entity, message)
+            await client.send_message(entity, message)
 
         return True
-
     except errors.PeerFloodError:
-        logger.warning(f"Flood error for user {user_id}")
         return False
     except errors.UserPrivacyRestrictedError:
-        logger.warning(f"Privacy restricted: {user_id}")
         return False
     except errors.UserBlockedError:
-        logger.warning(f"User blocked: {user_id}")
+        return False
+    except errors.InputUserDeactivatedError:
         return False
     except Exception as e:
-        logger.error(f"Error sending DM to {user_id}: {e}")
+        logger.debug(f"DM failed to {user_id}: {e}")
         return False
 
 
-async def send_dms_to_viewers(channel_id: str, viewers: list, channel_info: dict):
-    """Send DMs to all viewers who haven't received one yet."""
-    message = get_dm_message()
-    media = get_dm_media()
+async def send_dm_from_all_accounts(channel_id: str, user_id: int, channel_info: dict) -> dict:
+    """
+    Send DM to a viewer from ALL connected accounts.
+    Each account sends the message once per user.
+    """
+    if has_user_received_dm(channel_id, user_id):
+        return {"sent": False, "reason": "already_dmed"}
+
+    config = get_dm_config()
+    message = config.get('message', '')
+    media = config.get('media', {})
+
+    if not message.strip():
+        return {"sent": False, "reason": "no_message_configured"}
+
+    media_url = media.get('url', '') if media else ''
+
+    await pool.ensure_all_connected()
+
     sent_count = 0
-    failed_count = 0
+    fail_count = 0
+    details = {}
+
+    for account_id, client in pool.clients.items():
+        # Small random delay between sends
+        await asyncio.sleep(random.uniform(1.0, 3.0))
+
+        success = await send_dm_from_client(client, user_id, message, media_url)
+        details[str(account_id)] = "sent" if success else "failed"
+        if success:
+            sent_count += 1
+        else:
+            fail_count += 1
+
+    # Mark as DMed across all accounts
+    mark_user_dmed(channel_id, user_id, list(pool.clients.keys())[0] if pool.clients else 0)
+
+    # Update channel stats
+    total = fb_get(f'channels/{channel_id}/total_dm_sent', 0) or 0
+    fb_set(f'channels/{channel_id}/total_dm_sent', total + sent_count)
+    sess = fb_get(f'channels/{channel_id}/session_dm_sent', 0) or 0
+    fb_set(f'channels/{channel_id}/session_dm_sent', sess + sent_count)
+
+    return {
+        "sent": sent_count > 0,
+        "accounts_used": sent_count,
+        "accounts_failed": fail_count,
+        "total_accounts": len(pool.clients),
+        "details": details
+    }
+
+
+async def send_dms_to_all_viewers(channel_id: str, viewers: list, channel_info: dict) -> dict:
+    """Send DMs to all viewers from all accounts."""
+    total_sent = 0
+    total_failed = 0
+    users_dmed = 0
+    users_skipped = 0
 
     for user_id in viewers:
-        if user_id == state.me.id:
-            continue  # Don't DM yourself
-        if has_received_dm(channel_id, user_id):
+        # Skip our own accounts
+        if user_id in pool.clients:
             continue
 
-        # Small delay to avoid flooding
-        await asyncio.sleep(2)
-
-        success = await send_dm_to_user(user_id, message, media)
-        if success:
-            mark_dm_sent(channel_id, user_id)
-            sent_count += 1
-            logger.info(f"DM sent to {user_id} from channel {channel_id}")
+        result = await send_dm_from_all_accounts(channel_id, user_id, channel_info)
+        if result.get("sent"):
+            users_dmed += 1
+            total_sent += result.get("accounts_used", 0)
+        elif result.get("reason") == "already_dmed":
+            users_skipped += 1
         else:
-            failed_count += 1
+            total_failed += result.get("accounts_failed", 0)
 
-    return {"sent": sent_count, "failed": failed_count}
+    return {
+        "users_dmed": users_dmed,
+        "users_skipped": users_skipped,
+        "total_dms_sent": total_sent,
+        "total_failed": total_failed,
+        "total_viewers": len(viewers)
+    }
 
 
 # ==================== MONITORING LOOP ====================
-async def monitor_channel(channel_id: str):
-    """Continuous monitoring loop for a single channel."""
-    channel_info = fb_get(f'channels/{channel_id}', {})
+monitoring_tasks: dict = {}  # channel_id -> asyncio.Task
+active_lives: dict = {}  # channel_id -> session info
+MONITOR_DELAY = 25  # seconds between checks
 
-    logger.info(f"Starting monitoring for channel: {channel_info.get('title', channel_id)}")
+
+async def monitor_channel(channel_id: str):
+    """Continuous monitoring loop for one channel."""
+    global active_lives
+
+    channel_info = fb_get(f'channels/{channel_id}', {})
+    title = channel_info.get('title', channel_id)
+    logger.info(f"🔍 Monitoring started: {title}")
 
     while True:
         try:
-            is_live = await check_live_stream(channel_id, channel_info)
+            await pool.ensure_all_connected()
+
+            if not pool.clients:
+                await asyncio.sleep(MONITOR_DELAY)
+                continue
+
+            # Use first available client for checking
+            check_client = list(pool.clients.values())[0]
+            is_live, viewers = await is_channel_live(check_client, channel_id)
 
             if is_live:
-                # Channel is live
-                if channel_id not in state.active_lives:
-                    state.active_lives[channel_id] = {
+                if channel_id not in active_lives:
+                    # Live just started!
+                    active_lives[channel_id] = {
                         "started_at": datetime.now(timezone.utc).isoformat(),
-                        "viewer_count": 0,
-                        "dm_sent_this_session": 0
+                        "viewer_count": len(viewers),
+                        "dm_sent_this_session": 0,
+                        "total_viewers_processed": 0
                     }
                     fb_update(f'channels/{channel_id}', {
+                        "is_currently_live": True,
                         "last_live_at": datetime.now(timezone.utc).isoformat(),
-                        "is_currently_live": True
+                        "current_viewers": len(viewers)
                     })
+                    logger.info(f"🔴 LIVE STARTED: {title} — {len(viewers)} viewers detected")
 
-                viewers = await get_live_viewers(channel_id)
-                state.active_lives[channel_id]["viewer_count"] = len(viewers)
+                # Check if message is configured
+                if not has_config_message():
+                    logger.warning(f"⚠️ No DM message configured for {title} — skipping DMs")
+                elif viewers:
+                    # Send DMs to all viewers from all accounts
+                    logger.info(f"📨 Sending DMs to {len(viewers)} viewers in {title}...")
+                    result = await send_dms_to_all_viewers(channel_id, viewers, channel_info)
+                    active_lives[channel_id]["dm_sent_this_session"] += result["total_dms_sent"]
+                    active_lives[channel_id]["total_viewers_processed"] += result["users_dmed"]
 
-                if viewers:
-                    result = await send_dms_to_viewers(channel_id, viewers, channel_info)
-                    state.active_lives[channel_id]["dm_sent_this_session"] += result["sent"]
                     fb_update(f'channels/{channel_id}', {
                         "current_viewers": len(viewers),
-                        "session_dm_sent": state.active_lives[channel_id]["dm_sent_this_session"]
+                        "session_dm_sent": active_lives[channel_id]["dm_sent_this_session"]
                     })
 
-                logger.info(f"Channel {channel_id} is LIVE — {len(viewers)} viewers, DMs sent this session: {state.active_lives[channel_id]['dm_sent_this_session']}")
-
+                    logger.info(f"✅ {title}: {result['users_dmed']} users DMed ({result['total_dms_sent']} total), "
+                               f"{result['users_skipped']} skipped, {len(viewers)} active")
             else:
-                # Channel is not live
-                if channel_id in state.active_lives:
-                    del state.active_lives[channel_id]
-                    fb_update(f'channels/{channel_id}', {"is_currently_live": False})
+                # Channel went offline
+                if channel_id in active_lives:
+                    session_info = active_lives.pop(channel_id)
+                    fb_update(f'channels/{channel_id}', {
+                        "is_currently_live": False,
+                        "current_viewers": 0,
+                        "session_dm_sent": 0
+                    })
+                    logger.info(f"⚫ Live ended: {title} — {session_info['dm_sent_this_session']} DMs sent this session")
 
-            # Wait before next check
-            await asyncio.sleep(30)  # Check every 30 seconds
+            await asyncio.sleep(MONITOR_DELAY)
 
         except asyncio.CancelledError:
-            logger.info(f"Monitoring cancelled for channel {channel_id}")
+            logger.info(f"Monitoring cancelled: {title}")
             break
         except Exception as e:
-            logger.error(f"Error in monitor loop for {channel_id}: {e}")
-            await asyncio.sleep(60)
+            logger.error(f"Monitor loop error for {title}: {e}")
+            await asyncio.sleep(MONITOR_DELAY * 2)
+
+
+async def start_monitoring(channel_id: str):
+    """Start monitoring a channel."""
+    if channel_id in monitoring_tasks:
+        monitoring_tasks[channel_id].cancel()
+    task = asyncio.create_task(monitor_channel(channel_id))
+    monitoring_tasks[channel_id] = task
+    logger.info(f"Monitoring task created for channel {channel_id}")
 
 
 async def start_all_monitoring():
-    """Start monitoring for all active channels."""
-    channels = await get_joined_channels()
-    for ch in channels:
-        ch_id = ch.get('id')
-        if ch_id and ch_id not in state.monitoring_tasks:
-            task = asyncio.create_task(monitor_channel(ch_id))
-            state.monitoring_tasks[ch_id] = task
-    logger.info(f"Started monitoring {len(state.monitoring_tasks)} channels")
+    """Start monitoring all saved channels."""
+    channels = fb_get('channels', {}) or {}
+    for ch_id in channels:
+        await start_monitoring(ch_id)
+    logger.info(f"All monitoring started: {len(monitoring_tasks)} channels")
 
 
-# ==================== ACCOUNT MANAGEMENT ====================
-async def login_account(phone_number: str) -> dict:
-    """Start login process for a new account."""
-    try:
-        # Create a new client for this account
-        session_name = f"account_{phone_number.replace('+', '').replace(' ', '')}"
-        new_client = TelegramClient(session_name, API_ID, API_HASH)
-
-        await new_client.connect()
-        sent_code = await new_client.send_code_request(phone_number)
-
-        # Store the phone_hash for later verification
-        accounts_pending = fb_get('pending_accounts', {}) or {}
-        accounts_pending[phone_number] = {
-            "phone_code_hash": sent_code.phone_code_hash,
-            "session_name": session_name,
-            "attempted_at": datetime.now(timezone.utc).isoformat()
-        }
-        fb_set('pending_accounts', accounts_pending)
-
-        return {"success": True, "message": "OTP sent successfully"}
-
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-async def verify_account(phone_number: str, otp_code: str, password: str = None) -> dict:
-    """Verify OTP and complete account login."""
-    pending = fb_get(f'pending_accounts/{phone_number}', {})
-    if not pending:
-        return {"success": False, "error": "No pending login for this number"}
-
-    try:
-        session_name = pending['session_name']
-        phone_code_hash = pending['phone_code_hash']
-
-        new_client = TelegramClient(session_name, API_ID, API_HASH)
-        await new_client.connect()
-
-        try:
-            await new_client.sign_in(
-                phone=phone_number,
-                code=otp_code,
-                phone_code_hash=phone_code_hash
-            )
-        except errors.SessionPasswordNeededError:
-            if not password:
-                return {"success": False, "error": "2FA password required", "need_password": True}
-            await new_client.sign_in(password=password)
-
-        me = await new_client.get_me()
-
-        # Save account
-        account_info = {
-            "phone": phone_number,
-            "user_id": me.id,
-            "first_name": me.first_name,
-            "username": me.username or "",
-            "added_at": datetime.now(timezone.utc).isoformat(),
-            "session_name": session_name,
-            "is_active": True
-        }
-
-        accounts = fb_get('accounts', {}) or {}
-        accounts[str(me.id)] = account_info
-        fb_set('accounts', accounts)
-
-        # Clear pending
-        fb_delete(f'pending_accounts/{phone_number}')
-
-        await new_client.disconnect()
-        return {"success": True, "account": account_info}
-
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-# ==================== DM MESSAGE CONFIG ====================
-def set_dm_message(text: str):
-    """Set the DM message text."""
-    current = fb_get('dm_config', {}) or {}
-    current['message'] = text
-    fb_set('dm_config', current)
-
-
-def set_dm_image(file_id: str, file_path: str):
-    """Set DM media image."""
-    current = fb_get('dm_config', {}) or {}
-    current['media'] = {
-        'type': 'image',
-        'file_id': file_id,
-        'file_path': file_path
-    }
-    fb_set('dm_config', current)
-
-
-def reset_dm_config():
-    """Reset DM message and media to defaults."""
-    fb_set('dm_config', {
-        'message': "👋 Hi! I noticed you're watching this live stream. Check out our community!"
-    })
-
-
-def reset_dm_sent(channel_id: str = None):
-    """Reset DM sent records — so users can receive DMs again."""
-    if channel_id:
-        fb_delete(f'dm_sent/{channel_id}')
-        fb_set(f'channels/{channel_id}/total_dm_sent', 0)
-    else:
-        fb_delete('dm_sent')
+async def stop_monitoring(channel_id: str):
+    """Stop monitoring a channel."""
+    if channel_id in monitoring_tasks:
+        monitoring_tasks[channel_id].cancel()
+        del monitoring_tasks[channel_id]
+    if channel_id in active_lives:
+        del active_lives[channel_id]
 
 
 # ==================== STATS ====================
-def get_stats() -> dict:
-    """Get overall bot statistics."""
+def get_full_stats() -> dict:
+    """Get complete bot statistics."""
     channels = fb_get('channels', {}) or {}
     accounts = fb_get('accounts', {}) or {}
-    dm_config = fb_get('dm_config', {})
+    dm_config = get_dm_config()
 
-    total_channels = len(channels)
-    total_accounts = len(accounts)
-    active_lives = len(state.active_lives)
-    total_dm_sent = sum(
-        ch.get('total_dm_sent', 0) for ch in channels.values()
-    )
+    total_dm_sent = sum(ch.get('total_dm_sent', 0) for ch in channels.values())
+    currently_live = sum(1 for ch in channels.values() if ch.get('is_currently_live'))
 
-    # Channel-level stats
-    channel_stats = []
+    channel_list = []
     for ch_id, ch in channels.items():
-        dm_sent_for_ch = fb_get(f'dm_sent/{ch_id}', {}) or {}
-        channel_stats.append({
+        dm_records = fb_get(f'dm_sent/{ch_id}', {}) or {}
+        channel_list.append({
             "id": ch_id,
             "title": ch.get('title', 'Unknown'),
             "username": ch.get('username', ''),
-            "is_live": ch_id in state.active_lives,
+            "is_live": ch.get('is_currently_live', False),
             "total_dm_sent": ch.get('total_dm_sent', 0),
-            "unique_users_dmed": len(dm_sent_for_ch),
-            "joined_at": ch.get('joined_at', '')
+            "session_dm_sent": ch.get('session_dm_sent', 0),
+            "unique_dmed": len(dm_records),
+            "current_viewers": ch.get('current_viewers', 0),
+            "joined_at": ch.get('added_at', ''),
+            "total_accounts": ch.get('total_accounts_at_join', 0)
         })
 
     return {
-        "total_channels": total_channels,
-        "total_accounts": total_accounts,
-        "active_lives": active_lives,
+        "total_channels": len(channels),
+        "total_accounts": len(accounts),
+        "total_loaded_clients": len(pool.clients),
+        "active_lives": currently_live,
         "total_dm_sent": total_dm_sent,
-        "dm_message": dm_config.get('message', 'Not set'),
+        "dm_configured": bool(dm_config.get('message', '').strip()),
+        "dm_message": dm_config.get('message', ''),
         "has_media": bool(dm_config.get('media')),
-        "channels": channel_stats,
-        "admins": fb_get('admins', []),
-        "accounts_list": list(accounts.values())
+        "channels": channel_list,
+        "accounts": list(accounts.values()),
+        "admins": fb_get('admins', [])
     }
 
 
-# ==================== BOT COMMAND HANDLERS ====================
-async def setup_bot_handlers():
-    """Setup bot command handlers for admin operations via Telegram."""
+# ==================== BOT COMMANDS ====================
+async def setup_bot_commands():
+    """Register bot command handlers."""
 
-    @state.bot_client.on(events.NewMessage(pattern='/start'))
-    async def start_handler(event):
-        user_id = event.sender_id
-        welcome = (
-            f"🤖 **Live Stream Monitor Bot**\n\n"
+    @pool.bot_client.on(events.NewMessage(pattern='/start'))
+    async def cmd_start(event):
+        await event.respond(
+            f"🤖 **Live Stream Monitor Bot v3**\n\n"
             f"Welcome {event.sender.first_name}!\n\n"
-            f"📊 /stats - View bot statistics\n"
-            f"📺 /channels - List monitored channels\n"
-            f"👤 /accounts - List connected accounts\n"
-            f"💬 /setmsg <text> - Set DM message\n"
-            f"🔄 /resetdm - Reset DM records\n"
-            f"➕ /addchannel <link/username> - Add channel\n"
-            f"ℹ️ /help - Show help\n\n"
-            f"Admins can manage via the web dashboard."
+            f"📺 /channels — List channels\n"
+            f"👤 /accounts — Connected accounts\n"
+            f"📊 /stats — Statistics\n"
+            f"💬 /setmsg <text> — Set DM message\n"
+            f"🔄 /resetdm — Reset DM records\n"
+            f"➕ /addchannel <link> — Add channel\n"
+            f"ℹ️ /help — Help"
         )
-        await event.respond(welcome)
 
-    @state.bot_client.on(events.NewMessage(pattern='/stats'))
-    async def stats_handler(event):
-        if not state.is_admin(event.sender_id):
-            await event.respond("❌ Admin only")
-            return
-        stats = get_stats()
-        msg = (
-            f"📊 **Bot Statistics**\n\n"
-            f"📺 Channels: {stats['total_channels']}\n"
-            f"👤 Accounts: {stats['total_accounts']}\n"
-            f"🔴 Active Lives: {stats['active_lives']}\n"
-            f"✉️ Total DMs Sent: {stats['total_dm_sent']}\n"
-            f"💬 DM Message: {stats['dm_message'][:100]}..."
-        )
+    @pool.bot_client.on(events.NewMessage(pattern='/stats'))
+    async def cmd_stats(event):
+        stats = get_full_stats()
+        msg = (f"📊 **Stats**\n\n"
+               f"👤 Accounts: {stats['total_loaded_clients']}\n"
+               f"📺 Channels: {stats['total_channels']}\n"
+               f"🔴 Live: {stats['active_lives']}\n"
+               f"✉️ Total DMs: {stats['total_dm_sent']}\n"
+               f"💬 Msg set: {'✅' if stats['dm_configured'] else '❌'}")
         await event.respond(msg)
 
-    @state.bot_client.on(events.NewMessage(pattern='/channels'))
-    async def channels_handler(event):
-        if not state.is_admin(event.sender_id):
-            await event.respond("❌ Admin only")
-            return
-        stats = get_stats()
+    @pool.bot_client.on(events.NewMessage(pattern='/channels'))
+    async def cmd_channels(event):
+        stats = get_full_stats()
         if not stats['channels']:
-            await event.respond("No channels added yet.")
+            await event.respond("No channels added.")
             return
-        msg = "📺 **Monitored Channels:**\n\n"
+        msg = "📺 **Channels:**\n\n"
         for ch in stats['channels']:
-            status = "🔴 LIVE" if ch['is_live'] else "⚫ Offline"
-            msg += f"• {ch['title']} ({status}) — {ch['total_dm_sent']} DMs sent\n"
+            s = "🔴 LIVE" if ch['is_live'] else "⚫"
+            msg += f"• {ch['title']} {s} — {ch['total_dm_sent']} DMs\n"
         await event.respond(msg)
 
-    @state.bot_client.on(events.NewMessage(pattern=r'/setmsg (.+)'))
-    async def setmsg_handler(event):
-        if not state.is_admin(event.sender_id):
-            await event.respond("❌ Admin only")
-            return
+    @pool.bot_client.on(events.NewMessage(pattern=r'/setmsg (.+)'))
+    async def cmd_setmsg(event):
         text = event.pattern_match.group(1)
-        set_dm_message(text)
-        await event.respond(f"✅ DM message set to:\n{text}")
+        fb_update('dm_config', {'message': text})
+        await event.respond(f"✅ DM message set!")
 
-    @state.bot_client.on(events.NewMessage(pattern='/resetdm'))
-    async def resetdm_handler(event):
-        if not state.is_admin(event.sender_id):
-            await event.respond("❌ Admin only")
-            return
-        reset_dm_sent()
-        await event.respond("✅ DM records reset. Users can receive DMs again.")
+    @pool.bot_client.on(events.NewMessage(pattern='/resetdm'))
+    async def cmd_resetdm(event):
+        fb_delete('dm_sent')
+        await event.respond("✅ DM records reset.")
 
-    @state.bot_client.on(events.NewMessage(pattern=r'/addchannel (.+)'))
-    async def addchannel_handler(event):
-        if not state.is_admin(event.sender_id):
-            await event.respond("❌ Admin only")
-            return
-        identifier = event.pattern_match.group(1)
-        await event.respond(f"⏳ Joining channel: {identifier}...")
-        result = await join_channel(identifier)
-        if result['success']:
-            ch_id = result['channel']['id']
-            task = asyncio.create_task(monitor_channel(ch_id))
-            state.monitoring_tasks[ch_id] = task
-            await event.respond(f"✅ Joined and monitoring: {result['channel']['title']}")
-        else:
-            await event.respond(f"❌ Failed: {result['error']}")
-
-    @state.bot_client.on(events.NewMessage(pattern='/accounts'))
-    async def accounts_handler(event):
-        if not state.is_admin(event.sender_id):
-            await event.respond("❌ Admin only")
-            return
-        accounts = fb_get('accounts', {}) or {}
-        if not accounts:
-            await event.respond("No accounts connected.")
-            return
-        msg = "👤 **Connected Accounts:**\n\n"
-        for acc_id, acc in accounts.items():
-            msg += f"• {acc.get('first_name', 'Unknown')} ({acc.get('phone', 'N/A')})\n"
-        await event.respond(msg)
-
-    @state.bot_client.on(events.NewMessage(pattern='/help'))
-    async def help_handler(event):
-        help_text = (
-            "📖 **Live Stream Monitor Bot Help**\n\n"
-            "**How it works:**\n"
-            "1. Add channels you want to monitor\n"
-            "2. Set your DM message with /setmsg\n"
-            "3. When someone goes live in a monitored channel,\n"
-            "   the bot automatically sends DMs to viewers\n"
-            "4. Each user gets DM only once per session\n\n"
-            "**Commands:**\n"
-            "/start - Welcome message\n"
-            "/stats - Bot statistics\n"
-            "/channels - List channels\n"
-            "/accounts - List accounts\n"
-            "/setmsg <text> - Set DM message\n"
-            "/resetdm - Reset DM records\n"
-            "/addchannel <link> - Add channel\n"
-            "/help - This help\n\n"
-            "🌐 Use the Web Dashboard for full control!"
+    @pool.bot_client.on(events.NewMessage(pattern='/help'))
+    async def cmd_help(event):
+        await event.respond(
+            "📖 **Help**\n\n"
+            "1. Add accounts via Web Dashboard\n"
+            "2. Add channels — bot joins with ALL accounts\n"
+            "3. Set DM message (required!)\n"
+            "4. Bot auto-detects live streams & sends DMs\n\n"
+            "⚠️ DM message must be set before monitoring!\n"
+            "Each viewer gets DM from ALL accounts."
         )
-        await event.respond(help_text)
 
-    logger.info("Bot command handlers registered")
+    logger.info("Bot commands registered")
 
 
 # ==================== MAIN ====================
 async def main():
-    """Main entry point."""
     logger.info("=" * 50)
-    logger.info("Telegram Live Stream Monitor Bot Starting...")
+    logger.info("Telegram Live Stream Monitor Bot v3")
     logger.info("=" * 50)
 
-    # Initialize
     load_local_db()
     init_firebase()
 
-    # Start Telegram clients
-    await init_clients()
-
-    # Setup bot handlers
-    await setup_bot_handlers()
-
-    # Start monitoring all channels
+    await pool.init_main()
+    await pool.init_bot()
+    await pool.load_all_accounts()
+    await setup_bot_commands()
     await start_all_monitoring()
 
-    logger.info("✅ Bot is fully operational!")
-    logger.info(f"User: {state.me.first_name}")
-    logger.info(f"Bot: @{state.bot_me.username}")
-    logger.info(f"Monitoring {len(state.monitoring_tasks)} channels")
+    logger.info(f"✅ Bot ready! {len(pool.clients)} accounts, {len(monitoring_tasks)} channels monitored")
+    logger.info(f"Admin ID: {ADMIN_IDS}")
 
-    # Keep running
-    await state.client.run_until_disconnected()
+    if not has_config_message():
+        logger.warning("⚠️ DM message not set! DMs will NOT be sent until configured.")
+
+    await pool.main_client.run_until_disconnected()
 
 
 def run_bot():
-    """Run the bot."""
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.info("Bot stopped")
 
 
 if __name__ == "__main__":
