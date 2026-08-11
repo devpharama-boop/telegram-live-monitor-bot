@@ -358,8 +358,6 @@ def api_dm_config():
 
     # Force full save (not merge) to ensure all fields persist
     fb_set('dm_config', new_config)
-    
-    logger.info(f"DM config saved: message='{message[:50]}...'")
     return jsonify({"success": True, "message": "DM config updated", "config": new_config})
 
 
