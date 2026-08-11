@@ -527,6 +527,10 @@ def api_accounts_verify():
 
             if authed:
                 me = await client.get_me()
+                # SAVE SESSION STRING for Railway persistence
+                session_str = client.session.save()
+                logger.info(f"🔑 Session captured for {me.first_name} (ID={me.id})")
+                
                 account_info = {
                     "phone": phone,
                     "user_id": me.id,
@@ -534,10 +538,13 @@ def api_accounts_verify():
                     "username": me.username or "",
                     "added_at": datetime.now(timezone.utc).isoformat(),
                     "session_name": session_name,
+                    "session_string": session_str,
                     "is_active": True
                 }
                 # Save account
                 fb_update(f'accounts/{me.id}', account_info)
+                # Also save session separately for bot.py
+                fb_set(f'sessions/{me.id}', session_str)
                 # Clear pending
                 _pending_logins.pop(phone, None)
                 fb_delete(f'pending_accounts/{phone}')
