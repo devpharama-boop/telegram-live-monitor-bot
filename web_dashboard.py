@@ -281,6 +281,15 @@ def api_accounts():
     return jsonify({"success": True, "accounts": list(accounts.values())})
 
 
+# ==================== ACCOUNT LOGIN (Built-in, no bot.py import) ====================
+# We handle login directly here to avoid cross-module database conflicts
+import asyncio
+from telethon import TelegramClient, errors as telethon_errors
+
+# In-memory pending logins (avoids file I/O race condition)
+_pending_logins: dict = {}
+
+
 @app.route('/api/accounts/login', methods=['POST'])
 def api_accounts_login():
     """Login a new account with phone number."""
@@ -290,12 +299,32 @@ def api_accounts_login():
     if not phone:
         return jsonify({"success": False, "error": "Phone number required"})
 
-    from bot import login_account
+    API_ID = int(os.getenv("TELEGRAM_API_ID", "35812449"))
+    API_HASH = os.getenv("TELEGRAM_API_HASH", "099cfed535a5b2dcd8e43f157d30e3ce")
+
+    async def _login():
+        session_name = f"account_{phone.replace('+', '').replace(' ', '').replace('-', '')}"
+        client = TelegramClient(session_name, API_ID, API_HASH)
+        try:
+            await client.connect()
+            sent_code = await client.send_code_request(phone)
+            _pending_logins[phone] = {
+                "phone_code_hash": sent_code.phone_code_hash,
+                "session_name": session_name,
+                "attempted_at": datetime.now(timezone.utc).isoformat()
+            }
+            # Also save to DB for persistence across restarts
+            fb_set(f'pending_accounts/{phone}', _pending_logins[phone])
+            await client.disconnect()
+            return {"success": True, "message": "OTP sent successfully"}
+        except Exception as e:
+            await client.disconnect()
+            return {"success": False, "error": str(e)}
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    result = loop.run_until_complete(login_account(phone))
+    result = loop.run_until_complete(_login())
     loop.close()
-
     return jsonify(result)
 
 
@@ -303,19 +332,91 @@ def api_accounts_login():
 def api_accounts_verify():
     """Verify OTP for account login."""
     data = request.get_json()
-    phone = data.get('phone', '')
-    otp = data.get('otp', '')
-    password = data.get('password', '')
+    phone = data.get('phone', '').strip()
+    otp = data.get('otp', '').strip()
+    password = data.get('password', '').strip()
 
     if not phone or not otp:
         return jsonify({"success": False, "error": "Phone and OTP required"})
 
-    from bot import verify_account
+    # Get pending login data — check in-memory first, then DB
+    pending = _pending_logins.get(phone)
+    if not pending:
+        pending = fb_get(f'pending_accounts/{phone}')
+    if not pending:
+        return jsonify({
+            "success": False,
+            "error": "No pending login for this number. Please send OTP again first."
+        })
+
+    API_ID = int(os.getenv("TELEGRAM_API_ID", "35812449"))
+    API_HASH = os.getenv("TELEGRAM_API_HASH", "099cfed535a5b2dcd8e43f157d30e3ce")
+
+    async def _verify():
+        session_name = pending['session_name']
+        phone_code_hash = pending['phone_code_hash']
+        client = TelegramClient(session_name, API_ID, API_HASH)
+        try:
+            await client.connect()
+            authed = False
+            try:
+                await client.sign_in(
+                    phone=phone,
+                    code=otp,
+                    phone_code_hash=phone_code_hash
+                )
+                authed = True
+            except telethon_errors.SessionPasswordNeededError:
+                if not password:
+                    await client.disconnect()
+                    return {"success": False, "error": "2FA password required", "need_password": True}
+                await client.sign_in(password=password)
+                authed = True
+
+            if authed:
+                me = await client.get_me()
+                account_info = {
+                    "phone": phone,
+                    "user_id": me.id,
+                    "first_name": me.first_name or "Unknown",
+                    "username": me.username or "",
+                    "added_at": datetime.now(timezone.utc).isoformat(),
+                    "session_name": session_name,
+                    "is_active": True
+                }
+                # Save account
+                fb_update(f'accounts/{me.id}', account_info)
+                # Clear pending
+                _pending_logins.pop(phone, None)
+                fb_delete(f'pending_accounts/{phone}')
+                await client.disconnect()
+                return {"success": True, "account": account_info}
+            else:
+                await client.disconnect()
+                return {"success": False, "error": "Login failed"}
+
+        except telethon_errors.PhoneCodeInvalidError:
+            await client.disconnect()
+            return {"success": False, "error": "Invalid OTP code. Please try again."}
+        except telethon_errors.PhoneCodeExpiredError:
+            await client.disconnect()
+            _pending_logins.pop(phone, None)
+            fb_delete(f'pending_accounts/{phone}')
+            return {"success": False, "error": "OTP expired. Please send a new OTP."}
+        except telethon_errors.PasswordHashInvalidError:
+            await client.disconnect()
+            return {"success": False, "error": "Incorrect 2FA password."}
+        except telethon_errors.FloodWaitError as e:
+            await client.disconnect()
+            return {"success": False, "error": f"Too many attempts. Wait {e.seconds} seconds."}
+        except Exception as e:
+            await client.disconnect()
+            return {"success": False, "error": f"Verification failed: {str(e)}"}
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    result = loop.run_until_complete(verify_account(phone, otp, password))
+    result = loop.run_until_complete(_verify())
     loop.close()
-
     return jsonify(result)
 
 
