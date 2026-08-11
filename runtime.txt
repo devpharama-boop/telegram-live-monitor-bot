@@ -1,2 +1,1 @@
-# runtime.txt - Python version for Railway
-python-3.11
+runtime: python-3.11
