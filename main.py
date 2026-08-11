@@ -1,6 +1,5 @@
 """Telegram Live Stream Monitor Bot"""
 
-import asyncio
 import logging
 import sys
 import os
@@ -31,24 +30,24 @@ logger = logging.getLogger(__name__)
 def run_health_server():
     """Simple HTTP health check server for Railway port binding"""
     from http.server import HTTPServer, BaseHTTPRequestHandler
-    
+
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(b'{"status":"ok","service":"telegram-live-monitor-bot"}')
-        
+
         def log_message(self, format, *args):
             pass  # suppress HTTP logs
-    
+
     port = int(os.environ.get('PORT', 8080))
     server = HTTPServer(('0.0.0.0', port), HealthHandler)
     logger.info(f"✅ Health server started on port {port}")
     server.serve_forever()
 
 
-async def main():
+def main():
     """Main entry point"""
     try:
         # Load config
@@ -64,11 +63,22 @@ async def main():
         health_thread = threading.Thread(target=run_health_server, daemon=True)
         health_thread.start()
 
-        # Initialize and start bot
+        # Initialize bot app
         bot_app = BotApp(config, db)
+
+        # Build the application
+        bot_app.build()
+
+        # Initialize accounts and monitors (sync wrapper for async calls)
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(bot_app.initialize())
+
         logger.info("🤖 Starting Telegram Live Monitor Bot...")
 
-        await bot_app.start()
+        # Run polling - this creates its own event loop (avoiding nested loop issue)
+        bot_app.app.run_polling(allowed_updates=['message', 'callback_query'])
 
     except KeyboardInterrupt:
         logger.info("🛑 Bot stopped by user")
@@ -78,4 +88,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
