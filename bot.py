@@ -325,10 +325,18 @@ async def save_channel(channel_id: str, title: str, username: str = '', identifi
 async def is_channel_live(client: TelegramClient, channel_id: str) -> tuple:
     """
     Check if a channel is currently live streaming.
+    Accepts both numeric IDs (-100xxx) and username strings.
     Returns: (is_live: bool, viewers: list)
     """
     try:
-        entity = await client.get_entity(int(channel_id))
+        # Handle both numeric channel IDs and usernames
+        cid = channel_id.strip()
+        if cid.lstrip('-').isdigit():
+            from telethon.tl.types import PeerChannel
+            entity = await client.get_entity(PeerChannel(int(cid)))
+        else:
+            entity = await client.get_entity(cid)
+
         messages = await client.get_messages(entity, limit=10)
 
         viewers = set()
