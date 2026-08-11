@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, types, functions, errors
+from telethon.sessions import StringSession
 from telethon.tl.types import (
     MessageMediaPhoto, MessageMediaDocument,
     InputPeerChannel, InputPeerUser, PeerChannel, PeerUser
@@ -128,44 +129,88 @@ def fb_delete(path):
 
 # ==================== CLIENT POOL ====================
 class ClientPool:
-    """Manages multiple Telegram client sessions for all accounts."""
+    """Manages multiple Telegram client sessions stored in Firebase."""
 
     def __init__(self):
         self.clients: dict = {}  # user_id -> TelegramClient
-        self.main_client: TelegramClient = None
-        self.bot_client: TelegramClient = None
         self.me = None
+        self.session_strings: dict = {}  # user_id -> session_string
+
+    def load_sessions_from_db(self):
+        """Load session strings from Firebase/local DB."""
+        sessions = fb_get('sessions', {}) or {}
+        self.session_strings = sessions
+        logger.info(f"Loaded {len(sessions)} session strings from DB")
+
+    def save_session_to_db(self, user_id: int, session_string: str):
+        """Save session string to DB for persistence."""
+        self.session_strings[str(user_id)] = session_string
+        fb_set(f'sessions/{user_id}', session_string)
+
+    def get_session_string(self, user_id: int) -> str:
+        """Get stored session string."""
+        return self.session_strings.get(str(user_id), '')
 
     async def init_main(self):
-        """Initialize the main admin client."""
-        self.main_client = TelegramClient('main_session', API_ID, API_HASH)
-        await self.main_client.start()
+        """Initialize the main admin client from stored session."""
+        self.load_sessions_from_db()
+        main_session = self.get_session_string(5844447576)
+        
+        if main_session:
+            self.main_client = TelegramClient(StringSession(main_session), API_ID, API_HASH)
+            await self.main_client.connect()
+        else:
+            self.main_client = TelegramClient('main_session', API_ID, API_HASH)
+            await self.main_client.start()
+            # Save session for next time
+            session_str = self.main_client.session.save()
+            self.save_session_to_db(5844447576, session_str)
+
         self.me = await self.main_client.get_me()
         self.clients[self.me.id] = self.main_client
-        logger.info(f"Main client: {self.me.first_name} (@{self.me.username})")
-
-    async def init_bot(self):
-        """Initialize bot client."""
-        self.bot_client = TelegramClient('bot_session', API_ID, API_HASH)
-        await self.bot_client.start(bot_token=BOT_TOKEN)
-        bot_me = await self.bot_client.get_me()
-        logger.info(f"Bot client: @{bot_me.username}")
+        logger.info(f"Main client: {self.me.first_name} (@{self.me.username}) ID={self.me.id}")
 
     async def load_all_accounts(self):
-        """Load all saved accounts and create clients for them."""
+        """Load all saved accounts from DB."""
+        self.load_sessions_from_db()
         accounts = fb_get('accounts', {}) or {}
+        
+        if not accounts:
+            logger.warning("⚠️ ZERO accounts in DB! No monitoring possible.")
+            return
+
         for user_id_str, acc in accounts.items():
             try:
                 user_id = int(user_id_str)
                 if user_id in self.clients:
                     continue
-                session_name = acc.get('session_name', f'account_{user_id}')
-                client = TelegramClient(session_name, API_ID, API_HASH)
-                await client.start()
+                
+                # Try session string first (persisted across redeploys)
+                session_str = self.get_session_string(user_id)
+                
+                if session_str:
+                    from telethon.sessions import StringSession
+                    client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+                    await client.connect()
+                    if not await client.is_user_authorized():
+                        logger.warning(f"Session expired for account {user_id}, need re-login")
+                        continue
+                else:
+                    # Fallback: try local session file
+                    session_name = acc.get('session_name', f'account_{user_id}')
+                    client = TelegramClient(session_name, API_ID, API_HASH)
+                    await client.start()
+                    # Save session string for persistence
+                    session_str = client.session.save()
+                    self.save_session_to_db(user_id, session_str)
+
                 self.clients[user_id] = client
-                logger.info(f"Loaded account: {acc.get('first_name', 'Unknown')} ({user_id})")
+                me = await client.get_me()
+                logger.info(f"✅ Loaded account: {me.first_name} (@{me.username}) ID={user_id}")
             except Exception as e:
                 logger.warning(f"Failed to load account {user_id_str}: {e}")
+
+        logger.info(f"📊 Total accounts loaded: {len(self.clients)}/{len(accounts)}")
 
     def get_all_clients(self) -> list:
         """Get all active clients."""
@@ -187,13 +232,16 @@ class ClientPool:
             return None
 
     async def ensure_all_connected(self):
-        """Ensure all clients are connected."""
+        """Ensure all clients are connected and authorized."""
         for uid, client in list(self.clients.items()):
             try:
                 if not client.is_connected():
                     await client.connect()
-            except:
-                pass
+                if not await client.is_user_authorized():
+                    logger.warning(f"Client {uid} not authorized, removing...")
+                    del self.clients[uid]
+            except Exception as e:
+                logger.warning(f"Client {uid} connection error: {e}")
 
 
 pool = ClientPool()
@@ -841,9 +889,7 @@ async def main():
     init_firebase()
 
     await pool.init_main()
-    await pool.init_bot()
     await pool.load_all_accounts()
-    await setup_bot_commands()
     await start_all_monitoring()
 
     logger.info(f"✅ Bot ready! {len(pool.clients)} accounts, {len(monitoring_tasks)} channels monitored")
@@ -851,6 +897,8 @@ async def main():
 
     if not has_config_message():
         logger.warning("⚠️ DM message not set! DMs will NOT be sent until configured.")
+    if not pool.clients:
+        logger.critical("❌ NO ACCOUNTS LOADED! Add accounts via web dashboard first!")
 
     await pool.main_client.run_until_disconnected()
 
