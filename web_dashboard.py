@@ -10,7 +10,8 @@ import json
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, redirect, url_for, session
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session, send_from_directory
+from functools import wraps
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, db
@@ -22,6 +23,36 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "telegram-live-monitor-secret-key-2024")
+
+# ==================== PASSWORD PROTECTION ====================
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "tinesh")
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Login page."""
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        if password == DASHBOARD_PASSWORD:
+            session['authenticated'] = True
+            return redirect(url_for('index'))
+        return render_template('login.html', error='❌ Wrong password!')
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('authenticated', None)
+    return redirect(url_for('login'))
+
+def require_auth(f):
+    """Decorator to require authentication."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('authenticated'):
+            if request.is_json or request.path.startswith('/api/'):
+                return jsonify({"success": False, "error": "Authentication required", "auth_required": True}), 401
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated
 
 # ==================== CONFIG ====================
 ADMIN_IDS = [5844447576]
@@ -130,6 +161,7 @@ def is_admin(user_id):
 
 # ==================== MAIN DASHBOARD ====================
 @app.route('/')
+@require_auth
 def index():
     """Main dashboard page."""
     return render_template('dashboard.html')
@@ -137,6 +169,7 @@ def index():
 
 # ==================== API ROUTES ====================
 @app.route('/api/stats')
+@require_auth
 def api_stats():
     """Get bot statistics."""
     channels = fb_get('channels', {}) or {}
@@ -186,6 +219,7 @@ def api_stats():
 
 
 @app.route('/api/channels', methods=['GET', 'POST'])
+@require_auth
 def api_channels():
     """List channels or add a new one."""
     if request.method == 'GET':
@@ -322,6 +356,7 @@ def api_channels():
 
 
 @app.route('/api/channels/<channel_id>', methods=['DELETE'])
+@require_auth
 def api_delete_channel(channel_id):
     """Remove a channel."""
     fb_delete(f'channels/{channel_id}')
@@ -330,6 +365,7 @@ def api_delete_channel(channel_id):
 
 
 @app.route('/api/dm/config', methods=['GET', 'POST'])
+@require_auth
 def api_dm_config():
     """Get or set DM configuration."""
     if request.method == 'GET':
@@ -362,6 +398,7 @@ def api_dm_config():
 
 
 @app.route('/api/dm/reset', methods=['POST'])
+@require_auth
 def api_reset_dm():
     """Reset DM records."""
     data = request.get_json() or {}
@@ -377,6 +414,7 @@ def api_reset_dm():
 
 
 @app.route('/api/dm/reset-config', methods=['POST'])
+@require_auth
 def api_reset_dm_config():
     """Reset DM message config to default."""
     fb_set('dm_config', {
@@ -386,6 +424,7 @@ def api_reset_dm_config():
 
 
 @app.route('/api/accounts', methods=['GET'])
+@require_auth
 def api_accounts():
     """Get connected accounts."""
     accounts = fb_get('accounts', {}) or {}
@@ -402,6 +441,7 @@ _pending_logins: dict = {}
 
 
 @app.route('/api/accounts/login', methods=['POST'])
+@require_auth
 def api_accounts_login():
     """Login a new account with phone number."""
     data = request.get_json()
@@ -440,6 +480,7 @@ def api_accounts_login():
 
 
 @app.route('/api/accounts/verify', methods=['POST'])
+@require_auth
 def api_accounts_verify():
     """Verify OTP for account login."""
     data = request.get_json()
@@ -532,6 +573,7 @@ def api_accounts_verify():
 
 
 @app.route('/api/admins', methods=['GET', 'POST'])
+@require_auth
 def api_admins():
     """Get admins or add a new admin."""
     if request.method == 'GET':
@@ -555,6 +597,7 @@ def api_admins():
 
 
 @app.route('/api/admins/<int:user_id>', methods=['DELETE'])
+@require_auth
 def api_remove_admin(user_id):
     """Remove an admin."""
     if user_id in ADMIN_IDS:
@@ -570,6 +613,7 @@ def api_remove_admin(user_id):
 
 
 @app.route('/api/user/check/<int:user_id>')
+@require_auth
 def api_check_user(user_id):
     """Check if a user is admin."""
     return jsonify({
