@@ -529,7 +529,7 @@ def api_accounts_verify():
                 me = await client.get_me()
                 # SAVE SESSION STRING for Railway persistence
                 session_str = client.session.save()
-                logger.info(f"🔑 Session captured for {me.first_name} (ID={me.id})")
+                print(f"🔑 Session captured for {me.first_name} (ID={me.id})")
                 
                 account_info = {
                     "phone": phone,
