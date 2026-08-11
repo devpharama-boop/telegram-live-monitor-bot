@@ -197,10 +197,7 @@ def api_channels():
 
     identifier = invite_link if is_invite and invite_link else channel_input
     if not identifier:
-        return jsonify({"success": False, "error": "Channel username, ID, or invite link required"})
-
-    # Detect if it's a numeric channel ID (e.g., -1004368116984)
-    is_channel_id = identifier.lstrip('-').isdigit()
+        return jsonify({"success": False, "error": "Channel username or invite link required"})
 
     API_ID = int(os.getenv("TELEGRAM_API_ID", "35812449"))
     API_HASH = os.getenv("TELEGRAM_API_HASH", "099cfed535a5b2dcd8e43f157d30e3ce")
@@ -228,13 +225,8 @@ def api_channels():
         entity = None
         joined_already = False
         try:
-            if is_channel_id:
-                from telethon.tl.types import PeerChannel
-                entity = await list(client_pool.values())[0].get_entity(PeerChannel(int(identifier)))
-                joined_already = True
-            else:
-                entity = await list(client_pool.values())[0].get_entity(identifier)
-                joined_already = True
+            entity = await list(client_pool.values())[0].get_entity(identifier)
+            joined_already = True
         except Exception:
             joined_already = False
 
@@ -244,6 +236,7 @@ def api_channels():
         for uid, client in client_pool.items():
             try:
                 if is_invite:
+                    # Invite link join
                     hash_part = identifier.split('/')[-1].replace('+', '')
                     try:
                         update = await client(ImportChatInviteRequest(hash=hash_part))
@@ -254,9 +247,6 @@ def api_channels():
                     except errors.InviteHashInvalidError:
                         join_results[str(uid)] = {"success": False, "error": "Invalid invite"}
                         continue
-                elif is_channel_id:
-                    from telethon.tl.types import PeerChannel
-                    entity = await client.get_entity(PeerChannel(int(identifier)))
                 else:
                     entity = await client.get_entity(identifier)
 
