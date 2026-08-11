@@ -324,8 +324,11 @@ async def save_channel(channel_id: str, title: str, username: str = '', identifi
 # ==================== LIVE DETECTION ====================
 async def is_channel_live(client: TelegramClient, channel_id: str) -> tuple:
     """
-    Check if a channel is currently live streaming.
-    Accepts both numeric IDs (-100xxx) and username strings.
+    Detect if channel is live using multiple methods:
+    1. Check for active voice/video chat
+    2. Recent message timestamps + views
+    3. Message action types (pinned messages, service actions)
+    4. Message content keywords
     Returns: (is_live: bool, viewers: list)
     """
     try:
@@ -337,60 +340,106 @@ async def is_channel_live(client: TelegramClient, channel_id: str) -> tuple:
         else:
             entity = await client.get_entity(cid)
 
-        messages = await client.get_messages(entity, limit=10)
+        # Method 1: Check full channel info for active call/stream
+        try:
+            full = await client(functions.channels.GetFullChannelRequest(channel=entity))
+            if full.full_chat:
+                call = getattr(full.full_chat, 'call', None)
+                if call and hasattr(call, 'id'):
+                    logger.info(f"🔴 Voice/video chat active in {getattr(entity, 'title', channel_id)}")
+                    return (True, [])
+        except Exception:
+            pass
 
+        # Method 2: Get recent messages and check timestamps + views
+        messages = await client.get_messages(entity, limit=20)
         viewers = set()
         live_found = False
+        recent_msg_count = 0
+
+        now = datetime.now(timezone.utc)
 
         for msg in messages:
             if msg is None:
                 continue
 
+            # Check if message is recent (within last 3 minutes)
+            if msg.date:
+                msg_time = msg.date.replace(tzinfo=timezone.utc) if msg.date.tzinfo is None else msg.date
+                age_seconds = (now - msg_time).total_seconds()
+            else:
+                age_seconds = 999
+
             text = (msg.message or '').lower()
 
-            # Check live indicators
-            live_keywords = ['🔴 live', 'stream started', 'is live', 'live now',
-                           'broadcasting', '#live', 'live stream', 'went live',
-                           'starting live', 'live on', 'streaming now']
+            # Method 3: High views on very recent messages = likely live
+            if msg.views and msg.views > 20 and age_seconds < 180:
+                live_found = True
+                recent_msg_count += 1
+
+            # Method 4: Check message actions (live stream started, pinned, etc.)
+            if msg.action:
+                action_str = str(msg.action)
+                if any(kw in action_str for kw in [
+                    'LiveStream', 'live_stream', 'started_live',
+                    'broadcast', 'video_chat', 'voice_chat',
+                    'group_call', 'inviteToGroupCall'
+                ]):
+                    live_found = True
+                    logger.info(f"🔴 Live action detected: {action_str[:80]}")
+
+            # Method 5: Keyword-based detection (fallback)
+            live_keywords = [
+                '🔴 live', '🔴live', 'stream started', 'is live', 'live now',
+                'broadcasting', '#live', 'live stream', 'went live',
+                'starting live', 'live on', 'streaming now', 'we are live',
+                'live broadcast', 'live show', 'chaliye live', 'live aa gaye'
+            ]
             if any(kw in text for kw in live_keywords):
                 live_found = True
 
-            # Check for voice/video chat indicators (Telegram live stream)
-            if msg.action:
-                action_name = str(msg.action).lower()
-                if any(kw in action_name for kw in ['live', 'stream', 'broadcast']):
+            # Method 6: Check for forwarded message from "live" channel
+            if msg.fwd_from:
+                fwd_str = str(msg.fwd_from)
+                if 'live' in fwd_str.lower():
                     live_found = True
 
-            # Check media for live indicators
-            if msg.media:
-                media_str = str(msg.media).lower()
-                if any(kw in media_str for kw in ['live', 'stream']):
-                    live_found = True
-
-            # Collect viewers (message senders from last 10 messages)
-            if msg.from_id and live_found:
+            # Collect viewer IDs from recent messages
+            if msg.from_id and age_seconds < 600:  # last 10 minutes
                 try:
                     if hasattr(msg.from_id, 'user_id'):
-                        viewers.add(msg.from_id.user_id)
+                        uid = msg.from_id.user_id
+                        if uid not in pool.clients:
+                            viewers.add(uid)
                 except:
                     pass
 
-            # Check reactions/view count
-            if msg.views and msg.views > 10 and msg.date:
-                age_seconds = (datetime.now(timezone.utc) - msg.date.replace(tzinfo=timezone.utc)).total_seconds()
-                if age_seconds < 300:  # Message is less than 5 min old with views
-                    live_found = True
+            # Collect viewers from reactions/forwards
+            if msg.forwards and msg.forwards > 5 and age_seconds < 300:
+                live_found = True
 
-        # If live found, get more viewers from recent messages
+        # Method 7: If 5+ very recent messages, assume live
+        if recent_msg_count >= 5:
+            live_found = True
+
+        # Also get recent reactions to expand viewer list
         if live_found:
-            recent_msgs = await client.get_messages(entity, limit=30)
-            for msg in recent_msgs:
-                if msg and msg.from_id:
-                    try:
-                        if hasattr(msg.from_id, 'user_id'):
-                            viewers.add(msg.from_id.user_id)
-                    except:
-                        pass
+            try:
+                recent = await client.get_messages(entity, limit=50)
+                for msg in recent:
+                    if msg and msg.from_id:
+                        try:
+                            if hasattr(msg.from_id, 'user_id'):
+                                uid = msg.from_id.user_id
+                                if uid not in pool.clients:
+                                    viewers.add(uid)
+                        except:
+                            pass
+            except:
+                pass
+
+        if live_found:
+            logger.info(f"🔴 LIVE: {getattr(entity, 'title', channel_id)} - {len(viewers)} viewers, {recent_msg_count} recent msgs")
 
         return (live_found, list(viewers))
 
@@ -539,7 +588,7 @@ async def send_dms_to_all_viewers(channel_id: str, viewers: list, channel_info: 
 # ==================== MONITORING LOOP ====================
 monitoring_tasks: dict = {}  # channel_id -> asyncio.Task
 active_lives: dict = {}  # channel_id -> session info
-MONITOR_DELAY = 25  # seconds between checks
+MONITOR_DELAY = 15  # seconds between checks (faster detection)
 
 
 async def monitor_channel(channel_id: str):
