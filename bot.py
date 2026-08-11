@@ -183,15 +183,10 @@ class ClientPool:
                 logger.info(f"✅ Main client from DB session: {self.me.first_name} (ID={self.me.id})")
                 return
         
-        # LAST RESORT: Start from scratch (WILL FAIL on Railway no-stdin!)
-        logger.critical("❌ NO SESSION! Bot cannot start. Add MAIN_SESSION_STRING env var!")
-        self.main_client = TelegramClient('main_session', API_ID, API_HASH)
-        await self.main_client.start()
-        self.me = await self.main_client.get_me()
-        self.clients[self.me.id] = self.main_client
-        session_str = self.main_client.session.save()
-        self.save_session_to_db(ADMIN_ID, session_str)
-        logger.info(f"Main client: {self.me.first_name} ID={self.me.id}")
+        # LAST RESORT: NO session available - log critical and raise
+        logger.critical("❌ NO SESSION! Add MAIN_SESSION_STRING env var or login via Dashboard.")
+        logger.critical("⚠️ Bot monitoring will be DISABLED. Dashboard is still accessible.")
+        raise RuntimeError("No Telegram session available. Login via Dashboard first.")
 
     async def load_all_accounts(self):
         """Load all saved accounts from DB."""

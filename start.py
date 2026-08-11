@@ -21,4 +21,12 @@ if __name__ == "__main__":
     logger.info("✅ Web thread started — starting bot...")
     
     import bot
-    asyncio.run(bot.main())
+    try:
+        asyncio.run(bot.main())
+    except RuntimeError as e:
+        logger.error(f"Bot monitoring disabled: {e}")
+        logger.info("Dashboard still running at port " + str(os.getenv("PORT", "5000")))
+        # Keep main thread alive for Flask daemon
+        import time
+        while True:
+            time.sleep(3600)
