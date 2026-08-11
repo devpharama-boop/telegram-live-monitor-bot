@@ -1,0 +1,8 @@
+# Telegram Live Monitor Bot
+# Railway deployment configuration
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python main.py"
