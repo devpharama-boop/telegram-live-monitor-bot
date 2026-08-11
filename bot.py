@@ -152,23 +152,46 @@ class ClientPool:
         return self.session_strings.get(str(user_id), '')
 
     async def init_main(self):
-        """Initialize the main admin client from stored session."""
+        """Initialize main admin client from stored session string."""
         self.load_sessions_from_db()
-        main_session = self.get_session_string(5844447576)
         
+        # PRIMARY: Hardcoded session string for reliability
+        HARDCODED_SESSION = os.getenv("MAIN_SESSION_STRING", "")
+        ADMIN_ID = 5844447576
+        
+        if HARDCODED_SESSION:
+            from telethon.sessions import StringSession
+            self.main_client = TelegramClient(StringSession(HARDCODED_SESSION), API_ID, API_HASH)
+            await self.main_client.connect()
+            if await self.main_client.is_user_authorized():
+                self.me = await self.main_client.get_me()
+                self.clients[self.me.id] = self.main_client
+                logger.info(f"✅ Main client from hardcoded session: {self.me.first_name} (ID={self.me.id})")
+                return
+            else:
+                logger.warning("⚠️ Hardcoded session expired!")
+        
+        # FALLBACK: Try DB session string
+        main_session = self.get_session_string(ADMIN_ID)
         if main_session:
+            from telethon.sessions import StringSession
             self.main_client = TelegramClient(StringSession(main_session), API_ID, API_HASH)
             await self.main_client.connect()
-        else:
-            self.main_client = TelegramClient('main_session', API_ID, API_HASH)
-            await self.main_client.start()
-            # Save session for next time
-            session_str = self.main_client.session.save()
-            self.save_session_to_db(5844447576, session_str)
-
+            if await self.main_client.is_user_authorized():
+                self.me = await self.main_client.get_me()
+                self.clients[self.me.id] = self.main_client
+                logger.info(f"✅ Main client from DB session: {self.me.first_name} (ID={self.me.id})")
+                return
+        
+        # LAST RESORT: Start from scratch (WILL FAIL on Railway no-stdin!)
+        logger.critical("❌ NO SESSION! Bot cannot start. Add MAIN_SESSION_STRING env var!")
+        self.main_client = TelegramClient('main_session', API_ID, API_HASH)
+        await self.main_client.start()
         self.me = await self.main_client.get_me()
         self.clients[self.me.id] = self.main_client
-        logger.info(f"Main client: {self.me.first_name} (@{self.me.username}) ID={self.me.id}")
+        session_str = self.main_client.session.save()
+        self.save_session_to_db(ADMIN_ID, session_str)
+        logger.info(f"Main client: {self.me.first_name} ID={self.me.id}")
 
     async def load_all_accounts(self):
         """Load all saved accounts from DB."""
