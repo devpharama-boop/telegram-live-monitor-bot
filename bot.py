@@ -84,8 +84,9 @@ def fb_set(path, value):
     if firebase_ref:
         try:
             firebase_ref.child(path).set(value)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Firebase write failed for {path}: {e}")
+    # Always write to local DB as fallback
     parts = path.strip('/').split('/')
     d = local_db
     for part in parts[:-1]:
@@ -94,6 +95,12 @@ def fb_set(path, value):
         d = d[part]
     d[parts[-1]] = value
     save_local_db()
+    # Sync to Firebase if available
+    if firebase_ref:
+        try:
+            firebase_ref.child(path).set(value)
+        except:
+            pass
 
 def fb_update(path, value):
     current = fb_get(path, {}) or {}
@@ -597,19 +604,39 @@ async def monitor_channel(channel_id: str):
 
     channel_info = fb_get(f'channels/{channel_id}', {})
     title = channel_info.get('title', channel_id)
-    logger.info(f"🔍 Monitoring started: {title}")
+    logger.info(f"🔍 Monitoring started: {title} (checking every {MONITOR_DELAY}s)")
+
+    consecutive_errors = 0
 
     while True:
         try:
             await pool.ensure_all_connected()
 
             if not pool.clients:
+                logger.warning(f"⚠️ No clients available for {title}, sleeping...")
                 await asyncio.sleep(MONITOR_DELAY)
                 continue
 
-            # Use first available client for checking
-            check_client = list(pool.clients.values())[0]
-            is_live, viewers = await is_channel_live(check_client, channel_id)
+            # Try ALL clients for checking
+            is_live = False
+            viewers = []
+            last_error = None
+
+            for uid, check_client in pool.clients.items():
+                try:
+                    is_live, viewers = await is_channel_live(check_client, channel_id)
+                    last_error = None
+                    break  # Found a working client
+                except Exception as e:
+                    last_error = str(e)
+                    continue
+
+            if last_error and not is_live:
+                consecutive_errors += 1
+                if consecutive_errors == 1 or consecutive_errors % 60 == 0:
+                    logger.warning(f"⚠️ Live check error for {title}: {last_error}")
+            else:
+                consecutive_errors = 0
 
             if is_live:
                 if channel_id not in active_lives:
@@ -625,14 +652,17 @@ async def monitor_channel(channel_id: str):
                         "last_live_at": datetime.now(timezone.utc).isoformat(),
                         "current_viewers": len(viewers)
                     })
-                    logger.info(f"🔴 LIVE STARTED: {title} — {len(viewers)} viewers detected")
+                    logger.info(f"🔴 LIVE DETECTED: {title} — {len(viewers)} potential viewers")
 
                 # Check if message is configured
                 if not has_config_message():
-                    logger.warning(f"⚠️ No DM message configured for {title} — skipping DMs")
+                    if channel_id not in active_lives or active_lives[channel_id].get('warned_no_msg') != True:
+                        logger.warning(f"⚠️ DM not configured for {title} — skipping DMs")
+                        if channel_id in active_lives:
+                            active_lives[channel_id]['warned_no_msg'] = True
                 elif viewers:
-                    # Send DMs to all viewers from all accounts
-                    logger.info(f"📨 Sending DMs to {len(viewers)} viewers in {title}...")
+                    # Send DMs
+                    logger.info(f"📨 Sending DMs to {len(viewers)} users in {title} from {len(pool.clients)} accounts...")
                     result = await send_dms_to_all_viewers(channel_id, viewers, channel_info)
                     active_lives[channel_id]["dm_sent_this_session"] += result["total_dms_sent"]
                     active_lives[channel_id]["total_viewers_processed"] += result["users_dmed"]
@@ -642,8 +672,10 @@ async def monitor_channel(channel_id: str):
                         "session_dm_sent": active_lives[channel_id]["dm_sent_this_session"]
                     })
 
-                    logger.info(f"✅ {title}: {result['users_dmed']} users DMed ({result['total_dms_sent']} total), "
-                               f"{result['users_skipped']} skipped, {len(viewers)} active")
+                    logger.info(f"✅ DONE {title}: {result['users_dmed']} users DMed ({result['total_dms_sent']} msgs), "
+                               f"{result['users_skipped']} skipped")
+                else:
+                    logger.debug(f"🔴 LIVE but no viewers yet: {title}")
             else:
                 # Channel went offline
                 if channel_id in active_lives:
