@@ -588,7 +588,7 @@ async def send_dms_to_all_viewers(channel_id: str, viewers: list, channel_info: 
 # ==================== MONITORING LOOP ====================
 monitoring_tasks: dict = {}  # channel_id -> asyncio.Task
 active_lives: dict = {}  # channel_id -> session info
-MONITOR_DELAY = 15  # seconds between checks (faster detection)
+MONITOR_DELAY = 5  # seconds between checks (fast detection)
 
 
 async def monitor_channel(channel_id: str):
