@@ -4,6 +4,7 @@ import logging
 import sys
 import os
 import threading
+import asyncio
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -45,11 +46,9 @@ def run_health_server():
 
 
 def main():
-    """Main entry point"""
     try:
         config = Config()
         logger.info("✅ Config loaded")
-
         db = Database(config.db_path)
         db.initialize()
         logger.info("✅ Database initialized")
@@ -57,9 +56,13 @@ def main():
         health_thread = threading.Thread(target=run_health_server, daemon=True)
         health_thread.start()
 
+        # Nested asyncio fix for Python 3.12+
+        import nest_asyncio
+        nest_asyncio.apply()
+
         bot_app = BotApp(config, db)
         logger.info("🤖 Starting Telegram Live Monitor Bot...")
-        bot_app.run()
+        asyncio.get_event_loop().run_until_complete(bot_app.start())
 
     except KeyboardInterrupt:
         logger.info("🛑 Bot stopped by user")
