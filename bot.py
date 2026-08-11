@@ -402,9 +402,23 @@ async def is_channel_live(client: TelegramClient, channel_id: str) -> tuple:
                 call = getattr(full.full_chat, 'call', None)
                 if call and hasattr(call, 'id'):
                     logger.info(f"🔴 Voice/video chat active in {getattr(entity, 'title', channel_id)}")
-                    return (True, [])
-        except Exception:
-            pass
+                    # Also try to get participants as viewers from the call
+                    viewers_from_call = []
+                    try:
+                        participants = await client.get_participants(entity, limit=100)
+                        for p in participants:
+                            if p.id not in pool.clients:
+                                viewers_from_call.append(p.id)
+                        logger.info(f"👥 Found {len(viewers_from_call)} potential viewers from participants")
+                    except Exception:
+                        pass
+                    return (True, viewers_from_call)
+        except Exception as e:
+            err_str = str(e)
+            if 'private' in err_str.lower() or 'CHANNEL_PRIVATE' in err_str.upper():
+                logger.warning(f"⚠️ Account not member of channel — can't check live call")
+            else:
+                logger.debug(f"GetFullChannel error: {err_str[:100]}")
 
         # Method 2: Get recent messages and check timestamps + views
         messages = await client.get_messages(entity, limit=20)
