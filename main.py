@@ -63,22 +63,10 @@ def main():
         health_thread = threading.Thread(target=run_health_server, daemon=True)
         health_thread.start()
 
-        # Initialize bot app
+        # Initialize and run bot (handles event loop internally)
         bot_app = BotApp(config, db)
-
-        # Build the application
-        bot_app.build()
-
-        # Initialize accounts and monitors (sync wrapper for async calls)
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(bot_app.initialize())
-
         logger.info("🤖 Starting Telegram Live Monitor Bot...")
-
-        # Run polling - this creates its own event loop (avoiding nested loop issue)
-        bot_app.app.run_polling(allowed_updates=['message', 'callback_query'])
+        bot_app.run()
 
     except KeyboardInterrupt:
         logger.info("🛑 Bot stopped by user")
