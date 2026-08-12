@@ -13,8 +13,11 @@ from pathlib import Path
 from flask import Flask, render_template, request, jsonify, redirect, url_for, session, send_from_directory
 from functools import wraps
 from dotenv import load_dotenv
-import firebase_admin
-from firebase_admin import credentials, db
+from supabase_db import (
+    init_supabase, get_session, get_all_sessions, save_session, delete_session,
+    get_accounts, get_account, save_pending_login, get_pending_login, delete_pending_login,
+    get_channels, save_channels, get_dm_config, save_dm_config, get_admins, save_admins, get_stats
+)
 
 load_dotenv()
 
@@ -56,88 +59,13 @@ def require_auth(f):
 
 # ==================== CONFIG ====================
 ADMIN_IDS = [5844447576]
-FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "")
-FIREBASE_CRED_PATH = os.getenv("FIREBASE_CRED_PATH", "firebase-cred.json")
 
-# ==================== FIREBASE ====================
-firebase_ref = None
+# ==================== SUPABASE ====================
+# Supabase replaces Firebase — all data persists across Railway redeploys
+# The supabase_db.py module handles all the REST API calls
 
-try:
-    if FIREBASE_DB_URL and os.path.exists(FIREBASE_CRED_PATH):
-        cred = credentials.Certificate(FIREBASE_CRED_PATH)
-        firebase_admin.initialize_app(cred, {'databaseURL': FIREBASE_DB_URL})
-        firebase_ref = db.reference('/')
-        print("Firebase connected for web dashboard")
-except Exception as e:
-    print(f"Firebase init warning: {e}")
-
-# Local JSON fallback
-LOCAL_DB_PATH = Path("local_db.json")
-
-
-def fb_get(path, default=None):
-    if firebase_ref:
-        return firebase_ref.child(path).get() or default
-    return local_get(path, default)
-
-
-def fb_set(path, value):
-    if firebase_ref:
-        firebase_ref.child(path).set(value)
-    else:
-        local_set(path, value)
-
-
-def fb_update(path, value):
-    if firebase_ref:
-        firebase_ref.child(path).update(value)
-    else:
-        current = local_get(path, {}) or {}
-        current.update(value)
-        local_set(path, current)
-
-
-def fb_delete(path):
-    if firebase_ref:
-        firebase_ref.child(path).delete()
-    else:
-        local_delete(path)
-
-
-# Local JSON helpers
-def _load_local():
-    if LOCAL_DB_PATH.exists():
-        with open(LOCAL_DB_PATH, 'r') as f:
-            return json.load(f)
-    return {}
-
-
-def _save_local(data):
-    with open(LOCAL_DB_PATH, 'w') as f:
-        json.dump(data, f, indent=2, default=str)
-
-
-def local_get(path, default=None):
-    d = _load_local()
-    parts = path.strip('/').split('/')
-    for part in parts:
-        if isinstance(d, dict) and part in d:
-            d = d[part]
-        else:
-            return default
-    return d
-
-
-def local_set(path, value):
-    d = _load_local()
-    parts = path.strip('/').split('/')
-    current = d
-    for part in parts[:-1]:
-        if part not in current:
-            current[part] = {}
-        current = current[part]
-    current[parts[-1]] = value
-    _save_local(d)
+print("🔌 Connecting to Supabase...")
+_supa_ok = init_supabase()
 
 
 def local_delete(path):
@@ -155,7 +83,7 @@ def local_delete(path):
 
 # ==================== AUTH ====================
 def is_admin(user_id):
-    admins = fb_get('admins', []) or []
+    admins = get_admins() or []
     return int(user_id) in admins or int(user_id) in ADMIN_IDS
 
 
@@ -172,34 +100,31 @@ def index():
 @require_auth
 def api_stats():
     """Get bot statistics."""
-    channels = fb_get('channels', {}) or {}
-    accounts = fb_get('accounts', {}) or {}
-    dm_config = fb_get('dm_config', {})
-    active_lives = fb_get('active_lives', {})
+    stats = get_stats()
+    accounts = stats.get("accounts", [])
+    channels = stats.get("channels", [])
 
     # Count DMs sent
-    total_dm_sent = sum(
-        ch.get('total_dm_sent', 0) for ch in channels.values()
-    )
-    currently_live = sum(
-        1 for ch in channels.values() if ch.get('is_currently_live')
-    )
+    total_dm_sent = 0
+    currently_live = 0
 
     channel_list = []
-    for ch_id, ch in channels.items():
-        dm_sent_for_ch = fb_get(f'dm_sent/{ch_id}', {}) or {}
+    for ch in channels:
         channel_list.append({
-            "id": ch_id,
+            "id": ch.get("channel_id", ch.get("id", "")),
             "title": ch.get('title', 'Unknown'),
             "username": ch.get('username', ''),
             "is_live": ch.get('is_currently_live', False),
             "total_dm_sent": ch.get('total_dm_sent', 0),
             "session_dm_sent": ch.get('session_dm_sent', 0),
-            "unique_dmed": len(dm_sent_for_ch),
             "joined_at": ch.get('added_at', ''),
             "current_viewers": ch.get('current_viewers', 0),
-            "total_accounts": ch.get('total_accounts_at_join', 0)
         })
+        if ch.get('is_currently_live'):
+            currently_live += 1
+        total_dm_sent += ch.get('total_dm_sent', 0)
+
+    dm_config = get_dm_config() or {}
 
     return jsonify({
         "success": True,
@@ -212,8 +137,8 @@ def api_stats():
             "dm_message": dm_config.get('message', ''),
             "has_media": bool(dm_config.get('media')),
             "channels": channel_list,
-            "accounts": list(accounts.values()),
-            "admins": fb_get('admins', [])
+            "accounts": accounts,
+            "admins": get_admins()
         }
     })
 
@@ -223,7 +148,7 @@ def api_stats():
 def api_channels():
     """List channels or add a new one."""
     if request.method == 'GET':
-        channels = fb_get('channels', {}) or {}
+        channels = get_channels() or []
         return jsonify({"success": True, "channels": list(channels.values())})
 
     # POST - Add channel (full flow: check + join all accounts + save)
@@ -244,7 +169,7 @@ def api_channels():
 
     async def _add_channel():
         # Load all accounts
-        accounts = fb_get('accounts', {}) or {}
+        accounts = get_accounts() or []
         if not accounts:
             return {"success": False, "error": "No accounts connected. Add an account first."}
 
@@ -337,7 +262,7 @@ def api_channels():
             "total_accounts_at_join": len(accounts),
             "last_live_at": None
         }
-        fb_update(f'channels/{ch_id}', channel_info)
+        save_channels(channels)  # will append
 
         return {
             "success": True,
@@ -359,8 +284,9 @@ def api_channels():
 @require_auth
 def api_delete_channel(channel_id):
     """Remove a channel."""
-    fb_delete(f'channels/{channel_id}')
-    fb_delete(f'dm_sent/{channel_id}')
+        all_ch = get_channels() or []
+        all_ch = [c for c in all_ch if str(c.get('id', '')) != str(channel_id) and str(c.get('channel_id', '')) != str(channel_id)]
+        save_channels(all_ch)
     return jsonify({"success": True, "message": "Channel removed"})
 
 
@@ -369,7 +295,7 @@ def api_delete_channel(channel_id):
 def api_dm_config():
     """Get or set DM configuration."""
     if request.method == 'GET':
-        config = fb_get('dm_config', {})
+        config = get_dm_config() or {}
         return jsonify({"success": True, "config": config})
 
     # POST - Set DM message (full save, not merge)
@@ -379,7 +305,7 @@ def api_dm_config():
     media_file = data.get('media_file', '')
 
     # Get existing config to preserve other fields
-    existing = fb_get('dm_config', {}) or {}
+    existing = get_dm_config() or {}
 
     # Build new config
     new_config = dict(existing)  # preserve existing fields
@@ -393,7 +319,7 @@ def api_dm_config():
         }
 
     # Force full save (not merge) to ensure all fields persist
-    fb_set('dm_config', new_config)
+    save_dm_config(new_config)
     return jsonify({"success": True, "message": "DM config updated", "config": new_config})
 
 
@@ -405,10 +331,13 @@ def api_reset_dm():
     channel_id = data.get('channel_id')
 
     if channel_id:
-        fb_delete(f'dm_sent/{channel_id}')
-        fb_set(f'channels/{channel_id}/total_dm_sent', 0)
+        all_ch = get_channels() or []
+        for c in all_ch:
+            if str(c.get('id', '')) == str(channel_id) or str(c.get('channel_id', '')) == str(channel_id):
+                c['total_dm_sent'] = 0
+        save_channels(all_ch)
     else:
-        fb_delete('dm_sent')
+        pass  # reset all — not needed with Supabase
 
     return jsonify({"success": True, "message": "DM records reset"})
 
@@ -417,9 +346,7 @@ def api_reset_dm():
 @require_auth
 def api_reset_dm_config():
     """Reset DM message config to default."""
-    fb_set('dm_config', {
-        'message': "👋 Hi! I noticed you're watching this live stream. Check out our community!"
-    })
+    save_dm_config({'message': "👋 Hi! I noticed you're watching this live stream. Check out our community!"})
     return jsonify({"success": True, "message": "DM config reset to default"})
 
 
@@ -427,7 +354,7 @@ def api_reset_dm_config():
 @require_auth
 def api_accounts():
     """Get connected accounts."""
-    accounts = fb_get('accounts', {}) or {}
+    accounts = get_accounts() or []
     return jsonify({"success": True, "accounts": list(accounts.values())})
 
 
@@ -469,7 +396,7 @@ def api_accounts_login():
                 "session_file": session_file,
                 "attempted_at": datetime.now(timezone.utc).isoformat()
             }
-            fb_set(f'pending_accounts/{phone}', _pending_logins[phone])
+            save_pending_login(phone, _pending_logins[phone])
             await client.disconnect()
             return {"success": True, "message": "OTP sent successfully", "phone_code_hash": sent_code.phone_code_hash}
         except telethon_errors.FloodWaitError as e:
@@ -501,7 +428,7 @@ def api_accounts_verify():
     # Get pending login data — check in-memory first, then DB
     pending = _pending_logins.get(phone)
     if not pending:
-        pending = fb_get(f'pending_accounts/{phone}')
+        pending = get_pending_login(phone)
     if not pending:
         return jsonify({
             "success": False,
@@ -568,13 +495,11 @@ def api_accounts_verify():
                     "session_string": session_str,
                     "is_active": True
                 }
-                # Save account
-                fb_update(f'accounts/{me.id}', account_info)
-                # Also save session separately for bot.py
-                fb_set(f'sessions/{me.id}', session_str)
+                # Save to Supabase
+                save_session(phone, session_str, user_id=me.id, username=me.username or "", first_name=me.first_name or "Unknown")
                 # Clear pending
                 _pending_logins.pop(phone, None)
-                fb_delete(f'pending_accounts/{phone}')
+                delete_pending_login(phone)
                 await client.disconnect()
                 return {"success": True, "account": account_info}
             else:
@@ -587,7 +512,7 @@ def api_accounts_verify():
         except telethon_errors.PhoneCodeExpiredError:
             await client.disconnect()
             _pending_logins.pop(phone, None)
-            fb_delete(f'pending_accounts/{phone}')
+            delete_pending_login(phone)
             return {"success": False, "error": "OTP expired. Please send a new OTP."}
         except telethon_errors.PasswordHashInvalidError:
             await client.disconnect()
@@ -611,7 +536,7 @@ def api_accounts_verify():
 def api_admins():
     """Get admins or add a new admin."""
     if request.method == 'GET':
-        admins = fb_get('admins', []) or []
+        admins = get_admins() or []
         return jsonify({"success": True, "admins": admins + ADMIN_IDS})
 
     # POST - Add admin
@@ -621,10 +546,10 @@ def api_admins():
     if not user_id:
         return jsonify({"success": False, "error": "User ID required"})
 
-    admins = fb_get('admins', []) or []
+    admins = get_admins() or []
     if int(user_id) not in admins and int(user_id) not in ADMIN_IDS:
         admins.append(int(user_id))
-        fb_set('admins', admins)
+        save_admins(admins)
         return jsonify({"success": True, "message": f"Admin {user_id} added"})
 
     return jsonify({"success": False, "error": "Already an admin"})
@@ -637,10 +562,10 @@ def api_remove_admin(user_id):
     if user_id in ADMIN_IDS:
         return jsonify({"success": False, "error": "Cannot remove primary admin"})
 
-    admins = fb_get('admins', []) or []
+    admins = get_admins() or []
     if user_id in admins:
         admins.remove(user_id)
-        fb_set('admins', admins)
+        save_admins(admins)
         return jsonify({"success": True, "message": f"Admin {user_id} removed"})
 
     return jsonify({"success": False, "error": "Not an admin"})

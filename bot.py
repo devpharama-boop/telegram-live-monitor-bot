@@ -24,6 +24,11 @@ from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelReq
 from telethon.tl.functions.messages import ImportChatInviteRequest
 import firebase_admin
 from firebase_admin import credentials, db
+from supabase_db import (
+    init_supabase, get_session, get_all_sessions, save_session, delete_session,
+    get_accounts, get_account, save_pending_login, get_pending_login, delete_pending_login,
+    get_channels, save_channels, get_dm_config, save_dm_config, get_admins, save_admins, get_stats
+)
 
 load_dotenv()
 
@@ -40,6 +45,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ==================== DATABASE ====================
+# Supabase replaces Firebase for persistence across Railway redeploys
+supa_ok = init_supabase()
+
 firebase_ref = None
 LOCAL_DB_PATH = Path("local_db.json")
 local_db = {}
@@ -137,15 +145,15 @@ class ClientPool:
         self.session_strings: dict = {}  # user_id -> session_string
 
     def load_sessions_from_db(self):
-        """Load session strings from Firebase/local DB."""
-        sessions = fb_get('sessions', {}) or {}
+        """Load session strings from Supabase."""
+        sessions = get_all_sessions() or {}
         self.session_strings = sessions
-        logger.info(f"Loaded {len(sessions)} session strings from DB")
+        logger.info(f"Loaded {len(sessions)} session strings from Supabase")
 
     def save_session_to_db(self, user_id: int, session_string: str):
-        """Save session string to DB for persistence."""
+        """Save session string to Supabase for persistence."""
         self.session_strings[str(user_id)] = session_string
-        fb_set(f'sessions/{user_id}', session_string)
+        save_session(str(user_id), session_string, user_id=user_id)
 
     def get_session_string(self, user_id: int) -> str:
         """Get stored session string."""
@@ -158,14 +166,25 @@ class ClientPool:
         SESSION_FILE = "session_string.txt"
         session_str = None
         
-        # 1️⃣ TRY: session_string.txt file
+        # 1️⃣ TRY: Supabase (survives Railway redeploys!)
+        if not session_str:
+            try:
+                supa_sessions = get_all_sessions() or {}
+                if supa_sessions:
+                    first_key = next(iter(supa_sessions))
+                    session_str = supa_sessions[first_key]
+                    logger.info(f"🔥 Found session in Supabase for {first_key}")
+            except Exception as e:
+                logger.warning(f"Supabase session lookup failed: {e}")
+        
+        # 2️⃣ TRY: session_string.txt file
         if os.path.exists(SESSION_FILE):
             with open(SESSION_FILE, 'r') as f:
                 session_str = f.read().strip()
                 if session_str:
                     logger.info(f"📄 Found session in {SESSION_FILE}")
         
-        # 2️⃣ TRY: local_db.json
+        # 3️⃣ TRY: local_db.json
         if not session_str:
             try:
                 with open('local_db.json', 'r') as f:
@@ -176,33 +195,11 @@ class ClientPool:
             except:
                 pass
         
-        # 3️⃣ TRY: ENV var
+        # 4️⃣ TRY: ENV var
         if not session_str:
             session_str = os.getenv("MAIN_SESSION_STRING", "")
             if session_str:
                 logger.info("🔧 Found session in MAIN_SESSION_STRING env")
-        
-        # 4️⃣ TRY: Firebase (survives redeploys!)
-        if not session_str:
-            try:
-                # Look for any session in Firebase
-                sessions = fb_get('sessions', {}) or {}
-                if sessions:
-                    # Get the first available session
-                    first_key = next(iter(sessions))
-                    session_str = sessions[first_key]
-                    logger.info(f"🔥 Found session in Firebase for user {first_key}")
-                else:
-                    # Check accounts
-                    accounts = fb_get('accounts', {}) or {}
-                    if accounts:
-                        first_key = next(iter(accounts))
-                        acc = accounts[first_key]
-                        if acc.get('session_string'):
-                            session_str = acc['session_string']
-                            logger.info(f"🔥 Found session in Firebase accounts for {acc.get('first_name', first_key)}")
-            except Exception as e:
-                logger.warning(f"Firebase session lookup failed: {e}")
         
         # Connect if we have a session
         if session_str:
