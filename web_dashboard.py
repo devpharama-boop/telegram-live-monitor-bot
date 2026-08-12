@@ -456,13 +456,17 @@ def api_accounts_login():
     async def _login():
         from telethon.sessions import StringSession
         from telethon import errors as telethon_errors
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        # CRITICAL: Create session file to persist auth key between send_code & sign_in
+        # phone_code_hash is tied to the auth key — must use SAME session!
+        session_file = f"login_{phone.replace('+', '')}"
+        client = TelegramClient(session_file, API_ID, API_HASH)
         try:
             await client.connect()
             sent_code = await client.send_code_request(phone, force_sms=True)
-            # Store pending login with StringSession
+            # Store pending login with session file name (NOT StringSession)
             _pending_logins[phone] = {
                 "phone_code_hash": sent_code.phone_code_hash,
+                "session_file": session_file,
                 "attempted_at": datetime.now(timezone.utc).isoformat()
             }
             fb_set(f'pending_accounts/{phone}', _pending_logins[phone])
@@ -510,7 +514,10 @@ def api_accounts_verify():
     async def _verify():
         from telethon.sessions import StringSession
         phone_code_hash = pending['phone_code_hash']
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        # REUSE the same session file from send_code_request!
+        # phone_code_hash is tied to the auth key — must match.
+        session_file = pending.get('session_file', f"login_{phone.replace('+', '')}")
+        client = TelegramClient(session_file, API_ID, API_HASH)
         try:
             await client.connect()
             authed = False
@@ -530,8 +537,13 @@ def api_accounts_verify():
 
             if authed:
                 me = await client.get_me()
-                # Save session to BOTH file and env var
-                session_str = client.session.save()
+                # Save session as StringSession for future use
+                session_str = StringSession.save(client.session)
+                # Clean up the temporary login session file
+                import glob as _glob
+                for _sf in _glob.glob(f"login_{phone.replace('+', '')}.session"):
+                    try: os.remove(_sf)
+                    except: pass
                 SESSION_FILE = "session_string.txt"
                 with open(SESSION_FILE, 'w') as f:
                     f.write(session_str)
