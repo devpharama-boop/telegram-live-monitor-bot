@@ -22,8 +22,6 @@ from telethon.tl.types import (
 from telethon.tl.functions.messages import GetDialogsRequest, CheckChatInviteRequest
 from telethon.tl.functions.channels import JoinChannelRequest, GetFullChannelRequest, GetParticipantRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
-import firebase_admin
-from firebase_admin import credentials, db
 from supabase_db import (
     init_supabase, get_session, get_all_sessions, save_session, delete_session,
     get_accounts, get_account, save_pending_login, get_pending_login, delete_pending_login,

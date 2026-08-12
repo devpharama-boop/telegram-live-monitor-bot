@@ -284,9 +284,9 @@ def api_channels():
 @require_auth
 def api_delete_channel(channel_id):
     """Remove a channel."""
-        all_ch = get_channels() or []
-        all_ch = [c for c in all_ch if str(c.get('id', '')) != str(channel_id) and str(c.get('channel_id', '')) != str(channel_id)]
-        save_channels(all_ch)
+    all_ch = get_channels() or []
+    all_ch = [c for c in all_ch if str(c.get('id', '')) != str(channel_id) and str(c.get('channel_id', '')) != str(channel_id)]
+    save_channels(all_ch)
     return jsonify({"success": True, "message": "Channel removed"})
 
 
