@@ -42,11 +42,9 @@ FIREBASE_CRED_PATH = os.getenv("FIREBASE_CRED_PATH", "firebase-cred.json")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ==================== DATABASE ====================
-# Supabase replaces Firebase for persistence across Railway redeploys
-supa_ok = init_supabase()
-
-firebase_ref = None
+# ==================== DATABASE (LOCAL FALLBACK ONLY) ====================
+# Supabase handles persistent session storage
+# local_db.json handles runtime monitoring state (channels, DM tracking)
 LOCAL_DB_PATH = Path("local_db.json")
 local_db = {}
 
@@ -220,18 +218,18 @@ class ClientPool:
         raise RuntimeError("No session. Login via Dashboard.")
 
     async def load_all_accounts(self):
-        """Load all saved accounts from DB."""
+        """Load all saved accounts from Supabase."""
         self.load_sessions_from_db()
-        accounts = fb_get('accounts', {}) or {}
+        accounts_list = get_accounts() or []
         
-        if not accounts:
+        if not accounts_list:
             logger.warning("⚠️ ZERO accounts in DB! No monitoring possible.")
             return
 
-        for user_id_str, acc in accounts.items():
+        for acc in accounts_list:
             try:
-                user_id = int(user_id_str)
-                if user_id in self.clients:
+                user_id = int(acc.get('user_id', '0'))
+                if not user_id or user_id in self.clients:
                     continue
                 
                 # Try session string first (persisted across redeploys)
@@ -949,7 +947,7 @@ async def main():
     logger.info("=" * 50)
 
     load_local_db()
-    init_firebase()
+    init_supabase()
 
     await pool.init_main()
     await pool.load_all_accounts()

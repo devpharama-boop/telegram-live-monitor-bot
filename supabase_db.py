@@ -84,13 +84,16 @@ def get_session(phone):
 def get_all_sessions():
     """Get all active session strings as {phone: session_string} dict."""
     try:
-        result = _req("GET", "/telegram_sessions?active=eq.true&select=phone,session_string,session_file_b64")
+        result = _req("GET", "/telegram_sessions?active=eq.true&select=phone,session_string,session_file_b64&order=updated_at.desc")
         if not result:
             return {}
         sessions = {}
         for row in result:
             phone = row.get("phone", "")
             ss = row.get("session_string")
+            # Skip config/meta rows that don't have real sessions
+            if not phone or phone in ("config", "channels_config", "dm_config", "admins_config"):
+                continue
             if not ss and row.get("session_file_b64"):
                 ss = _from_session_file_b64(row["session_file_b64"])
             if ss and phone:

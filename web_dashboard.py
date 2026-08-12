@@ -355,7 +355,7 @@ def api_reset_dm_config():
 def api_accounts():
     """Get connected accounts."""
     accounts = get_accounts() or []
-    return jsonify({"success": True, "accounts": list(accounts.values())})
+    return jsonify({"success": True, "accounts": accounts})
 
 
 # ==================== ACCOUNT LOGIN (Built-in, no bot.py import) ====================
