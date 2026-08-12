@@ -152,42 +152,55 @@ class ClientPool:
         return self.session_strings.get(str(user_id), '')
 
     async def init_main(self):
-        """Initialize main admin client from session_string.txt file."""
+        """Initialize main admin client from session sources in priority order."""
         from telethon.sessions import StringSession
         
         SESSION_FILE = "session_string.txt"
+        session_str = None
         
-        # PRIMARY: Load session from file
+        # 1️⃣ TRY: session_string.txt file
         if os.path.exists(SESSION_FILE):
             with open(SESSION_FILE, 'r') as f:
                 session_str = f.read().strip()
+                if session_str:
+                    logger.info(f"📄 Found session in {SESSION_FILE}")
+        
+        # 2️⃣ TRY: local_db.json
+        if not session_str:
+            try:
+                with open('local_db.json', 'r') as f:
+                    local = json.load(f)
+                    session_str = local.get('main_session_string', '')
+                    if session_str:
+                        logger.info("📦 Found session in local_db.json")
+            except:
+                pass
+        
+        # 3️⃣ TRY: ENV var
+        if not session_str:
+            session_str = os.getenv("MAIN_SESSION_STRING", "")
             if session_str:
+                logger.info("🔧 Found session in MAIN_SESSION_STRING env")
+        
+        # Connect if we have a session
+        if session_str:
+            try:
                 self.main_client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
                 await self.main_client.connect()
                 if await self.main_client.is_user_authorized():
                     self.me = await self.main_client.get_me()
                     self.clients[self.me.id] = self.main_client
-                    logger.info(f"✅ Main client from file: {self.me.first_name} (ID={self.me.id})")
+                    logger.info(f"✅ Main client loaded: {self.me.first_name} (ID={self.me.id})")
                     return
                 else:
-                    logger.warning("⚠️ Session file expired — deleting")
-                    os.remove(SESSION_FILE)
-        
-        # SECONDARY: Check env var
-        HARDCODED_SESSION = os.getenv("MAIN_SESSION_STRING", "")
-        if HARDCODED_SESSION:
-            self.main_client = TelegramClient(StringSession(HARDCODED_SESSION), API_ID, API_HASH)
-            await self.main_client.connect()
-            if await self.main_client.is_user_authorized():
-                self.me = await self.main_client.get_me()
-                self.clients[self.me.id] = self.main_client
-                logger.info(f"✅ Main client from env var: {self.me.first_name} (ID={self.me.id})")
-                return
+                    logger.warning("⚠️ Session expired!")
+            except Exception as e:
+                logger.warning(f"⚠️ Session connect failed: {e}")
         
         # NO SESSION available
-        logger.critical(f"❌ NO SESSION FILE! Login via Dashboard. File: {SESSION_FILE}")
-        logger.critical("⚠️ Bot monitoring DISABLED. Dashboard is still accessible.")
-        raise RuntimeError("No Telegram session. Login via Dashboard to create session_string.txt")
+        logger.critical("❌ NO SESSION! Login via Dashboard first.")
+        logger.critical("⚠️ Bot monitoring DISABLED. Dashboard is accessible.")
+        raise RuntimeError("No session. Login via Dashboard.")
 
     async def load_all_accounts(self):
         """Load all saved accounts from DB."""

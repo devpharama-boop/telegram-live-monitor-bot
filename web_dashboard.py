@@ -526,14 +526,22 @@ def api_accounts_verify():
 
             if authed:
                 me = await client.get_me()
-                # SAVE SESSION STRING TO FILE for permanent persistence
+                # Save session to BOTH file and env var
                 session_str = client.session.save()
                 SESSION_FILE = "session_string.txt"
                 with open(SESSION_FILE, 'w') as f:
                     f.write(session_str)
-                print(f"🔑 Session saved to {SESSION_FILE} for {me.first_name} (ID={me.id})")
-                # Also update env var at runtime
+                # Also save to local_db.json for persistence
+                try:
+                    with open('local_db.json', 'r') as f:
+                        local = json.load(f)
+                except:
+                    local = {}
+                local['main_session_string'] = session_str
+                with open('local_db.json', 'w') as f:
+                    json.dump(local, f)
                 os.environ["MAIN_SESSION_STRING"] = session_str
+                print(f"🔑 Session saved to {SESSION_FILE} + local_db.json for {me.first_name} (ID={me.id})")
                 
                 account_info = {
                     "phone": phone,
