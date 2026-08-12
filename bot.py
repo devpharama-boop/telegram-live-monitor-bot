@@ -182,6 +182,28 @@ class ClientPool:
             if session_str:
                 logger.info("🔧 Found session in MAIN_SESSION_STRING env")
         
+        # 4️⃣ TRY: Firebase (survives redeploys!)
+        if not session_str:
+            try:
+                # Look for any session in Firebase
+                sessions = fb_get('sessions', {}) or {}
+                if sessions:
+                    # Get the first available session
+                    first_key = next(iter(sessions))
+                    session_str = sessions[first_key]
+                    logger.info(f"🔥 Found session in Firebase for user {first_key}")
+                else:
+                    # Check accounts
+                    accounts = fb_get('accounts', {}) or {}
+                    if accounts:
+                        first_key = next(iter(accounts))
+                        acc = accounts[first_key]
+                        if acc.get('session_string'):
+                            session_str = acc['session_string']
+                            logger.info(f"🔥 Found session in Firebase accounts for {acc.get('first_name', first_key)}")
+            except Exception as e:
+                logger.warning(f"Firebase session lookup failed: {e}")
+        
         # Connect if we have a session
         if session_str:
             try:

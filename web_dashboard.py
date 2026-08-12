@@ -455,10 +455,11 @@ def api_accounts_login():
 
     async def _login():
         from telethon.sessions import StringSession
+        from telethon import errors as telethon_errors
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         try:
             await client.connect()
-            sent_code = await client.send_code_request(phone)
+            sent_code = await client.send_code_request(phone, force_sms=True)
             # Store pending login with StringSession
             _pending_logins[phone] = {
                 "phone_code_hash": sent_code.phone_code_hash,
@@ -466,7 +467,10 @@ def api_accounts_login():
             }
             fb_set(f'pending_accounts/{phone}', _pending_logins[phone])
             await client.disconnect()
-            return {"success": True, "message": "OTP sent successfully"}
+            return {"success": True, "message": "OTP sent successfully", "phone_code_hash": sent_code.phone_code_hash}
+        except telethon_errors.FloodWaitError as e:
+            await client.disconnect()
+            return {"success": False, "error": f"⚠️ Too many attempts! Wait {e.seconds // 60} minutes ({e.seconds}s). Please use a DIFFERENT phone number.", "flood_wait": e.seconds}
         except Exception as e:
             await client.disconnect()
             return {"success": False, "error": str(e)}
