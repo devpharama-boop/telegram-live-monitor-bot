@@ -454,17 +454,16 @@ def api_accounts_login():
     API_HASH = os.getenv("TELEGRAM_API_HASH", "099cfed535a5b2dcd8e43f157d30e3ce")
 
     async def _login():
-        session_name = f"account_{phone.replace('+', '').replace(' ', '').replace('-', '')}"
-        client = TelegramClient(session_name, API_ID, API_HASH)
+        from telethon.sessions import StringSession
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
         try:
             await client.connect()
             sent_code = await client.send_code_request(phone)
+            # Store pending login with StringSession
             _pending_logins[phone] = {
                 "phone_code_hash": sent_code.phone_code_hash,
-                "session_name": session_name,
                 "attempted_at": datetime.now(timezone.utc).isoformat()
             }
-            # Also save to DB for persistence across restarts
             fb_set(f'pending_accounts/{phone}', _pending_logins[phone])
             await client.disconnect()
             return {"success": True, "message": "OTP sent successfully"}
@@ -505,9 +504,9 @@ def api_accounts_verify():
     API_HASH = os.getenv("TELEGRAM_API_HASH", "099cfed535a5b2dcd8e43f157d30e3ce")
 
     async def _verify():
-        session_name = pending['session_name']
+        from telethon.sessions import StringSession
         phone_code_hash = pending['phone_code_hash']
-        client = TelegramClient(session_name, API_ID, API_HASH)
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
         try:
             await client.connect()
             authed = False
@@ -527,9 +526,14 @@ def api_accounts_verify():
 
             if authed:
                 me = await client.get_me()
-                # SAVE SESSION STRING for Railway persistence
+                # SAVE SESSION STRING TO FILE for permanent persistence
                 session_str = client.session.save()
-                print(f"🔑 Session captured for {me.first_name} (ID={me.id})")
+                SESSION_FILE = "session_string.txt"
+                with open(SESSION_FILE, 'w') as f:
+                    f.write(session_str)
+                print(f"🔑 Session saved to {SESSION_FILE} for {me.first_name} (ID={me.id})")
+                # Also update env var at runtime
+                os.environ["MAIN_SESSION_STRING"] = session_str
                 
                 account_info = {
                     "phone": phone,
@@ -537,7 +541,6 @@ def api_accounts_verify():
                     "first_name": me.first_name or "Unknown",
                     "username": me.username or "",
                     "added_at": datetime.now(timezone.utc).isoformat(),
-                    "session_name": session_name,
                     "session_string": session_str,
                     "is_active": True
                 }

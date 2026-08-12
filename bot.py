@@ -152,41 +152,42 @@ class ClientPool:
         return self.session_strings.get(str(user_id), '')
 
     async def init_main(self):
-        """Initialize main admin client from stored session string."""
-        self.load_sessions_from_db()
+        """Initialize main admin client from session_string.txt file."""
+        from telethon.sessions import StringSession
         
-        # PRIMARY: Hardcoded session string for reliability
+        SESSION_FILE = "session_string.txt"
+        
+        # PRIMARY: Load session from file
+        if os.path.exists(SESSION_FILE):
+            with open(SESSION_FILE, 'r') as f:
+                session_str = f.read().strip()
+            if session_str:
+                self.main_client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+                await self.main_client.connect()
+                if await self.main_client.is_user_authorized():
+                    self.me = await self.main_client.get_me()
+                    self.clients[self.me.id] = self.main_client
+                    logger.info(f"✅ Main client from file: {self.me.first_name} (ID={self.me.id})")
+                    return
+                else:
+                    logger.warning("⚠️ Session file expired — deleting")
+                    os.remove(SESSION_FILE)
+        
+        # SECONDARY: Check env var
         HARDCODED_SESSION = os.getenv("MAIN_SESSION_STRING", "")
-        ADMIN_ID = 5844447576
-        
         if HARDCODED_SESSION:
-            from telethon.sessions import StringSession
             self.main_client = TelegramClient(StringSession(HARDCODED_SESSION), API_ID, API_HASH)
             await self.main_client.connect()
             if await self.main_client.is_user_authorized():
                 self.me = await self.main_client.get_me()
                 self.clients[self.me.id] = self.main_client
-                logger.info(f"✅ Main client from hardcoded session: {self.me.first_name} (ID={self.me.id})")
-                return
-            else:
-                logger.warning("⚠️ Hardcoded session expired!")
-        
-        # FALLBACK: Try DB session string
-        main_session = self.get_session_string(ADMIN_ID)
-        if main_session:
-            from telethon.sessions import StringSession
-            self.main_client = TelegramClient(StringSession(main_session), API_ID, API_HASH)
-            await self.main_client.connect()
-            if await self.main_client.is_user_authorized():
-                self.me = await self.main_client.get_me()
-                self.clients[self.me.id] = self.main_client
-                logger.info(f"✅ Main client from DB session: {self.me.first_name} (ID={self.me.id})")
+                logger.info(f"✅ Main client from env var: {self.me.first_name} (ID={self.me.id})")
                 return
         
-        # LAST RESORT: NO session available - log critical and raise
-        logger.critical("❌ NO SESSION! Add MAIN_SESSION_STRING env var or login via Dashboard.")
-        logger.critical("⚠️ Bot monitoring will be DISABLED. Dashboard is still accessible.")
-        raise RuntimeError("No Telegram session available. Login via Dashboard first.")
+        # NO SESSION available
+        logger.critical(f"❌ NO SESSION FILE! Login via Dashboard. File: {SESSION_FILE}")
+        logger.critical("⚠️ Bot monitoring DISABLED. Dashboard is still accessible.")
+        raise RuntimeError("No Telegram session. Login via Dashboard to create session_string.txt")
 
     async def load_all_accounts(self):
         """Load all saved accounts from DB."""
